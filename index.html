@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hogarth</title>
+<style>
+  :root{
+    --bg:#09070d;
+    --panel:rgba(21,17,30,0.84);
+    --panel-strong:rgba(26,21,37,0.98);
+    --text:#f1ecdf;
+    --muted:rgba(241,236,223,0.72);
+    --border:rgba(241,236,223,0.2);
+    --accent:#ffcf8a;
+    --accent-2:#8dd6ff;
+  }
+  html,body{margin:0;min-height:100%;background:
+    radial-gradient(circle at top, rgba(83,60,124,0.2), transparent 34%),
+    radial-gradient(circle at 20% 20%, rgba(141,214,255,0.12), transparent 22%),
+    linear-gradient(180deg, #100d16 0%, var(--bg) 100%);
+    color:var(--text);font-family:Georgia, 'Times New Roman', serif;
+  }
+  body{display:grid;place-items:center;padding:24px;box-sizing:border-box;}
+  main{
+    width:min(920px,100%);
+    border:1px solid var(--border);
+    background:linear-gradient(180deg, rgba(28,22,39,0.92), rgba(14,11,20,0.94));
+    box-shadow:0 24px 80px rgba(0,0,0,0.45);
+    overflow:hidden;
+  }
+  .hero{
+    padding:40px clamp(20px, 4vw, 48px) 28px;
+    display:grid;
+    grid-template-columns:minmax(0,1.2fr) minmax(260px,0.8fr);
+    gap:28px;
+    align-items:end;
+  }
+  .eyebrow{
+    margin:0 0 14px;
+    font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--accent-2);
+  }
+  h1{
+    margin:0;
+    font-size:clamp(52px, 10vw, 96px);
+    line-height:.9;
+    letter-spacing:-.05em;
+  }
+  .lede{
+    margin:18px 0 0;
+    max-width:60ch;
+    font-size:18px;
+    line-height:1.6;
+    color:var(--muted);
+  }
+  .card{
+    background:var(--panel);
+    border:1px solid var(--border);
+    padding:22px;
+  }
+  .card h2{
+    margin:0 0 10px;
+    font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);
+  }
+  .card p{margin:0;color:var(--muted);line-height:1.6;font-size:14px;}
+  .actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px;}
+  .button{
+    appearance:none;border:1px solid rgba(255,207,138,0.35);background:rgba(255,207,138,0.1);
+    color:var(--text);text-decoration:none;padding:14px 18px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size:12px;letter-spacing:.12em;text-transform:uppercase;transition:transform .15s ease, background .15s ease, border-color .15s ease;
+  }
+  .button.primary{background:linear-gradient(180deg, rgba(255,207,138,0.24), rgba(255,207,138,0.14));color:#fff4e1;}
+  .button:hover{transform:translateY(-1px);border-color:rgba(255,207,138,0.7);background:rgba(255,207,138,0.18);}
+  .stages{
+    display:grid;
+    grid-template-columns:repeat(5, minmax(0,1fr));
+    gap:1px;
+    background:var(--border);
+    border-top:1px solid var(--border);
+  }
+  .stage{
+    background:var(--panel-strong);
+    padding:18px;
+    min-height:132px;
+  }
+  .stage b{display:block;font-size:15px;margin-bottom:8px;}
+  .stage span{display:block;font-size:13px;line-height:1.55;color:var(--muted);}
+  .stage a{display:inline-block;margin-top:14px;color:var(--accent-2);text-decoration:none;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase;}
+  .stage a:hover{text-decoration:underline;}
+  .footer{
+    padding:18px clamp(20px, 4vw, 48px) 28px;
+    color:rgba(241,236,223,0.52);
+    font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  }
+  @media (max-width: 840px){
+    .hero{grid-template-columns:1fr;}
+    .stages{grid-template-columns:1fr 1fr;}
+  }
+  @media (max-width: 540px){
+    .stages{grid-template-columns:1fr;}
+    .lede{font-size:16px;}
+  }
+</style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <div>
+      <p class="eyebrow">Hogarth prototype</p>
+      <h1>Boot sequence, town map, comic reader.</h1>
+      <p class="lede">This repo is a plain static HTML prototype, so it can be deployed on Vercel without a build step. Stage 5 is the most complete entry point and the one this landing page promotes first.</p>
+      <div class="actions">
+        <a class="button primary" href="/stages/stage5-enter-reader.html">Launch Stage 5</a>
+        <a class="button" href="/stages/stage1-boot.html">Start at Stage 1</a>
+      </div>
+    </div>
+    <aside class="card">
+      <h2>Vercel-ready</h2>
+      <p>Deploy this repository as a static site. Vercel can serve the root <code>index.html</code> and the stage files directly, with no install or build command required.</p>
+    </aside>
+  </section>
+  <section class="stages" aria-label="Stage links">
+    <div class="stage">
+      <b>Stage 1</b>
+      <span>Boot sequence and first collision.</span>
+      <a href="/stages/stage1-boot.html">Open</a>
+    </div>
+    <div class="stage">
+      <b>Stage 2</b>
+      <span>Static town layout and visual pass.</span>
+      <a href="/stages/stage2-town-static.html">Open</a>
+    </div>
+    <div class="stage">
+      <b>Stage 3</b>
+      <span>Dynamic plot growth and camera fit.</span>
+      <a href="/stages/stage3-town-dynamic.html">Open</a>
+    </div>
+    <div class="stage">
+      <b>Stage 4</b>
+      <span>Cover analysis from uploaded art.</span>
+      <a href="/stages/stage4-cover-analysis.html">Open</a>
+    </div>
+    <div class="stage">
+      <b>Stage 5</b>
+      <span>Reader handoff and the current prototype surface.</span>
+      <a href="/stages/stage5-enter-reader.html">Open</a>
+    </div>
+  </section>
+  <div class="footer">Static hosting target: Vercel</div>
+</main>
+</body>
+</html>

@@ -77,6 +77,37 @@
     font-family:'IBM Plex Mono', monospace; font-size:12px; color:rgba(240,236,226,0.65); line-height:1.6;
     border:1px dashed rgba(240,236,226,0.3); padding:12px 14px;
   }
+  #reader .statusLine{
+    font-family:'IBM Plex Mono', monospace; font-size:11px; color:rgba(240,236,226,0.55); line-height:1.6;
+  }
+
+  /* ---------- page viewer ---------- */
+  #pageView{ display:none; border-top:1px solid rgba(240,236,226,0.2); padding:18px 24px 24px; }
+  #pageView.active{ display:block; }
+  .pageStage{
+    position:relative; width:100%; max-height:56vh; overflow:auto;
+    display:flex; align-items:flex-start; justify-content:center;
+    background:#0c0a12; border:1px solid rgba(240,236,226,0.15);
+  }
+  .pageStage img{ display:block; max-width:100%; height:auto; opacity:0; transition:opacity 0.2s ease; }
+  .pageStage img.loaded{ opacity:1; }
+  .pageSpinner{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.08em; text-transform:uppercase;
+    color:rgba(240,236,226,0.55); opacity:0; pointer-events:none; transition:opacity 0.15s ease;
+  }
+  .pageSpinner.active{ opacity:1; }
+  .pageNav{
+    display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:12px;
+    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.06em; text-transform:uppercase;
+  }
+  .pageNav button{
+    background:rgba(20,16,28,0.7); color:#f0ece2; border:1px solid rgba(240,236,226,0.3);
+    padding:8px 14px; cursor:pointer; font:inherit; letter-spacing:inherit; text-transform:inherit;
+  }
+  .pageNav button:hover:not(:disabled){ background:rgba(240,236,226,0.12); }
+  .pageNav button:disabled{ opacity:0.3; cursor:default; }
+  .pageCounter{ color:rgba(240,236,226,0.65); }
 
   @media (max-width:520px){
     #reader .readerBody{ flex-direction:column; align-items:center; text-align:center; }
@@ -89,8 +120,8 @@
 <div id="hud">
   <div><span class="title">HOGARTH</span> <span class="dim" id="hudCount">/ town — 0 plots, 0 lit</span></div>
   <div id="controls">
-    <label for="fileInput" id="uploadLabel">Upload cover(s)</label>
-    <input id="fileInput" type="file" accept="image/*" multiple>
+    <label for="fileInput" id="uploadLabel">Upload comic(s)</label>
+    <input id="fileInput" type="file" accept=".cbz,.cbr,.zip,.rar" multiple>
     <button id="addMock" type="button">+ Add mock (no cover)</button>
   </div>
   <div id="status"></div>
@@ -103,11 +134,22 @@
     <span class="kicker">Now entering</span>
     <button class="closeBtn" id="readerClose" type="button">✕ Close</button>
   </div>
-  <div class="readerBody">
+  <div class="readerBody" id="readerBody">
     <canvas class="cover" id="readerCover" width="20" height="20"></canvas>
-    <div>
+    <div style="flex:1; min-width:0;">
       <h2 id="readerTitle">—</h2>
-      <div class="mountNote">Reader UI mounts here. This is the handoff point to Hogarth's actual comic reader — page decode pipeline and LRU cache take over from this screen.</div>
+      <div class="mountNote" id="readerFallback">Reader UI mounts here. This is the handoff point to Hogarth's actual comic reader — page decode pipeline and LRU cache take over from this screen.</div>
+    </div>
+  </div>
+  <div class="pageView" id="pageView">
+    <div class="pageStage">
+      <img id="pageImg" alt="Comic page">
+      <div class="pageSpinner" id="pageSpinner">Decoding…</div>
+    </div>
+    <div class="pageNav">
+      <button id="pagePrev" type="button">‹ Prev</button>
+      <span class="pageCounter" id="pageCounter">1 / 1</span>
+      <button id="pageNext" type="button">Next ›</button>
     </div>
   </div>
 </div>
@@ -124,9 +166,101 @@
   const readerCover = document.getElementById('readerCover');
   const readerTitle = document.getElementById('readerTitle');
   const readerClose = document.getElementById('readerClose');
+  const readerFallback = document.getElementById('readerFallback');
+  const pageView = document.getElementById('pageView');
+  const pageImg = document.getElementById('pageImg');
+  const pageSpinner = document.getElementById('pageSpinner');
+  const pagePrev = document.getElementById('pagePrev');
+  const pageNext = document.getElementById('pageNext');
+  const pageCounter = document.getElementById('pageCounter');
+  let readerPageIndex = 0;
   const fileInput = document.getElementById('fileInput');
   const uploadLabel = document.getElementById('uploadLabel');
   const addMockBtn = document.getElementById('addMock');
+
+  // ---------- comic decode pipeline (CBZ/CBR, fully in-browser) ----------
+  // libarchive.js is a WASM port of libarchive — it reads ZIP, RAR (v4 & v5),
+  // 7z, and TAR through one API, so CBZ and CBR share the same code path
+  // here instead of needing separate zip/unrar libraries.
+  const LIBARCHIVE_VERSION = '2.0.2';
+  let libarchivePromise = null;
+  function loadArchiveLib(){
+    if (!libarchivePromise){
+      libarchivePromise = import(`https://cdn.jsdelivr.net/npm/libarchive.js@${LIBARCHIVE_VERSION}/main.js`)
+        .then(({ Archive }) => {
+          Archive.init({
+            workerUrl: `https://cdn.jsdelivr.net/npm/libarchive.js@${LIBARCHIVE_VERSION}/dist/worker-bundle.js`
+          });
+          return Archive;
+        });
+    }
+    return libarchivePromise;
+  }
+
+  const IMAGE_EXT_RE = /\.(jpe?g|png|webp|gif|bmp)$/i;
+  const COMIC_EXT_RE = /\.(cbz|cbr|zip|rar)$/i;
+
+  function naturalCompare(a, b){
+    const tok = s => { const out = []; String(s).replace(/(\d+)|(\D+)/g, (_, d, t) => { out.push(d !== undefined ? [0, parseInt(d, 10)] : [1, t]); }); return out; };
+    const ax = tok(a), bx = tok(b);
+    const len = Math.min(ax.length, bx.length);
+    for (let i = 0; i < len; i++){
+      const [ak, av] = ax[i], [bk, bv] = bx[i];
+      if (ak !== bk) return ak - bk;
+      if (av !== bv) return typeof av === 'number' ? av - bv : (av < bv ? -1 : av > bv ? 1 : 0);
+    }
+    return ax.length - bx.length;
+  }
+
+  // extractFiles() returns a nested directory tree of {name: File | {name: File...}} —
+  // flatten it to a single list of {name, file} regardless of folder depth.
+  function flattenFileTree(node, prefix = ''){
+    const out = [];
+    for (const [name, val] of Object.entries(node)){
+      if (val instanceof File){
+        out.push({ name: prefix + name, file: val });
+      } else if (val && typeof val === 'object'){
+        out.push(...flattenFileTree(val, prefix + name + '/'));
+      }
+    }
+    return out;
+  }
+
+  // Lazy decode + LRU cache: pages are kept as raw File/Blob handles from the
+  // archive (cheap) and only turned into an object URL — the actual decode
+  // into something the <img> can paint — the moment they're viewed. Only the
+  // `limit` most-recently-viewed pages keep a live object URL; anything older
+  // gets revoked so a long book doesn't pin every page in memory at once.
+  class PageCache {
+    constructor(limit = 10){ this.limit = limit; this.map = new Map(); }
+    urlFor(index, file){
+      if (this.map.has(index)){
+        const url = this.map.get(index);
+        this.map.delete(index); this.map.set(index, url); // bump recency
+        return url;
+      }
+      const url = URL.createObjectURL(file);
+      this.map.set(index, url);
+      if (this.map.size > this.limit){
+        const oldestKey = this.map.keys().next().value;
+        URL.revokeObjectURL(this.map.get(oldestKey));
+        this.map.delete(oldestKey);
+      }
+      return url;
+    }
+    warm(index, file){ if (!this.map.has(index)) this.urlFor(index, file); }
+  }
+
+  async function decodeComicArchive(file){
+    const Archive = await loadArchiveLib();
+    const archive = await Archive.open(file);
+    const tree = await archive.extractFiles();
+    const entries = flattenFileTree(tree)
+      .filter(e => IMAGE_EXT_RE.test(e.name) && !/(^|\/)__macosx\//i.test(e.name))
+      .sort((a, b) => naturalCompare(a.name, b.name));
+    if (entries.length === 0) throw new Error('No image pages found in archive');
+    return { pages: entries, cache: new PageCache() };
+  }
 
   function showStatus(msg){
     statusEl.textContent = msg;
@@ -375,7 +509,7 @@
     g.add(lampGroup);
 
     plotGroup.add(g);
-    return { group:g, building, roof, sign, bulbMat, glowLight, lit:false, index, label:title, coverCanvas };
+    return { group:g, building, roof, sign, bulbMat, glowLight, lit:false, index, label:title, coverCanvas, comic:null };
   }
 
   function igniteLamp(plot, colorHex){
@@ -393,11 +527,12 @@
     requestAnimationFrame(step);
   }
 
-  function placePlot(title, baseHex, accentHex, lampHex, coverCanvas){
+  function placePlot(title, baseHex, accentHex, lampHex, coverCanvas, comic){
     const n = plots.length;
     const rowsNeeded = Math.floor(n/2)+1;
     if (rowsNeeded > builtRows){ builtRows = rowsNeeded; rebuildGroundAndStreet(builtRows); }
     const plot = createPlot(n, title, baseHex, accentHex, coverCanvas);
+    if (comic) plot.comic = comic;
     plots.push(plot);
     updateCameraFit();
     updateHud();
@@ -409,32 +544,56 @@
     hudCount.textContent = `/ town — ${plots.length} plot${plots.length===1?'':'s'}, ${lit} lit`;
   }
 
-  // ---------- upload + analysis ----------
-  function handleFile(file){
-    showStatus(`Analyzing "${file.name}"…`);
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      const s = Math.min(img.width, img.height);
-      const sx = (img.width-s)/2, sy = (img.height-s)/2;
-      const thumb = document.createElement('canvas');
-      thumb.width = 20; thumb.height = 20;
-      const tctx = thumb.getContext('2d');
-      tctx.imageSmoothingEnabled = false;
-      tctx.drawImage(img, sx, sy, s, s, 0, 0, 20, 20);
-      URL.revokeObjectURL(url);
+  // ---------- upload + decode + analysis ----------
+  // Downscales the first page of a decoded comic into the same 20x20 pixel
+  // canvas the old cover-image flow used, so dominant-color extraction and
+  // the pixel-art sign texture work unchanged — the comic's actual first
+  // page stands in for the "cover image" the rest of the town logic expects.
+  function makeThumbFromImage(img){
+    const s = Math.min(img.width, img.height);
+    const sx = (img.width-s)/2, sy = (img.height-s)/2;
+    const thumb = document.createElement('canvas');
+    thumb.width = 20; thumb.height = 20;
+    const tctx = thumb.getContext('2d');
+    tctx.imageSmoothingEnabled = false;
+    tctx.drawImage(img, sx, sy, s, s, 0, 0, 20, 20);
+    return thumb;
+  }
+
+  async function handleComicFile(file){
+    if (!COMIC_EXT_RE.test(file.name)){
+      showStatus(`Skipped "${file.name}" — only .cbz/.cbr/.zip/.rar supported`);
+      return;
+    }
+    showStatus(`Extracting "${file.name}"…`);
+    try {
+      const comic = await decodeComicArchive(file);
+      const coverUrl = comic.cache.urlFor(0, comic.pages[0].file);
+      const img = await new Promise((resolve, reject) => {
+        const im = new Image();
+        im.onload = () => resolve(im);
+        im.onerror = () => reject(new Error('Could not decode cover page'));
+        im.src = coverUrl;
+      });
+      const thumb = makeThumbFromImage(img);
       const dominant = extractDominantColor(thumb);
       const baseHex = shade(dominant, -0.28);
       const accentHex = shade(dominant, 0.32);
       const title = file.name.replace(/\.[^.]+$/, '');
-      placePlot(title, baseHex, accentHex, dominant, thumb);
-    };
-    img.onerror = () => showStatus(`Could not read "${file.name}"`);
-    img.src = url;
+      showStatus(`"${title}" — ${comic.pages.length} page${comic.pages.length===1?'':'s'}`);
+      placePlot(title, baseHex, accentHex, dominant, thumb, comic);
+    } catch (err){
+      showStatus(`Failed to read "${file.name}": ${err.message}`);
+    }
   }
-  fileInput.addEventListener('change', (e) => {
-    Array.from(e.target.files || []).forEach(handleFile);
+
+  fileInput.addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files || []);
     e.target.value = '';
+    // Sequential on purpose: each open() spins up its own WASM worker, and
+    // running a stack of large archives in parallel is a good way to stall
+    // the tab on a phone. One at a time keeps status messages honest too.
+    for (const file of files) await handleComicFile(file);
   });
 
   const mockTitles = ['Untitled Draft','Working Copy','No Cover Yet','Placeholder Vol.','Draft Pages','Scan Batch'];
@@ -511,11 +670,48 @@
     animateCameraTo(4.2, 7, lookAt, 1100, () => openReader(plot));
   }
 
+  function renderReaderPage(plot, index){
+    const { pages, cache } = plot.comic;
+    readerPageIndex = Math.max(0, Math.min(index, pages.length-1));
+    pageImg.classList.remove('loaded');
+    pageSpinner.classList.add('active');
+    const url = cache.urlFor(readerPageIndex, pages[readerPageIndex].file);
+    pageImg.onload = () => { pageImg.classList.add('loaded'); pageSpinner.classList.remove('active'); };
+    pageImg.src = url;
+    pageCounter.textContent = `${readerPageIndex+1} / ${pages.length}`;
+    pagePrev.disabled = readerPageIndex === 0;
+    pageNext.disabled = readerPageIndex === pages.length-1;
+    // Warm the next/prev couple of pages so paging feels instant without
+    // decoding the whole book up front.
+    for (const i of [readerPageIndex-1, readerPageIndex+1, readerPageIndex+2]){
+      if (i >= 0 && i < pages.length) cache.warm(i, pages[i].file);
+    }
+  }
+
+  function turnPage(delta){
+    const plot = focusedPlot;
+    if (!plot || !plot.comic) return;
+    renderReaderPage(plot, readerPageIndex + delta);
+  }
+  pagePrev.addEventListener('click', () => turnPage(-1));
+  pageNext.addEventListener('click', () => turnPage(1));
+
   function openReader(plot){
     readerTitle.textContent = plot.label;
     const rctx = readerCover.getContext('2d');
     rctx.clearRect(0,0,20,20);
     rctx.drawImage(plot.coverCanvas, 0, 0);
+
+    if (plot.comic && plot.comic.pages.length){
+      readerFallback.style.display = 'none';
+      pageView.classList.add('active');
+      renderReaderPage(plot, 0);
+    } else {
+      readerFallback.style.display = '';
+      readerFallback.textContent = 'This plot has no comic attached — it was added via "+ Add mock", not a real .cbz/.cbr upload.';
+      pageView.classList.remove('active');
+    }
+
     scrim.classList.add('open');
     reader.classList.add('open');
     readerClose.focus();
@@ -524,6 +720,7 @@
   function closeReader(){
     scrim.classList.remove('open');
     reader.classList.remove('open');
+    pageView.classList.remove('active');
     setControlsEnabled(true);
     const rows = Math.max(1, builtRows);
     const midZ = rowStartZ + (rows-1)*(zSpacing/2);
@@ -532,7 +729,12 @@
   }
   readerClose.addEventListener('click', closeReader);
   scrim.addEventListener('click', closeReader);
-  document.addEventListener('keydown', (e) => { if (e.key==='Escape' && reader.classList.contains('open')) closeReader(); });
+  document.addEventListener('keydown', (e) => {
+    if (!reader.classList.contains('open')) return;
+    if (e.key==='Escape') closeReader();
+    else if (e.key==='ArrowLeft') turnPage(-1);
+    else if (e.key==='ArrowRight') turnPage(1);
+  });
 
   function animate(now){
     requestAnimationFrame(animate);

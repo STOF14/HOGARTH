@@ -17,8 +17,17 @@ Three.js and the pixel font (Press Start 2P) load from CDN, so you'll need an in
 connection on first load.
 
 ```
+index.html                          ← root landing page for Vercel deployments
 stages/stage5-enter-reader.html   ← open this one first, it's the most complete
 ```
+
+## Deploying on Vercel
+
+This repo is ready for static hosting on Vercel as-is. Point Vercel at the repository root,
+leave the build command empty, and use the root `index.html` as the entry point. The
+included `vercel.json` keeps the site on static hosting and enables clean URLs.
+
+The landing page links to every stage, with Stage 5 highlighted as the main prototype.
 
 ## Repo structure
 
