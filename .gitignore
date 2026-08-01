@@ -1,0 +1,15 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Future tooling (no build step exists yet, but reserving these
+# in case the repo grows a bundler/dev server later)
+node_modules/
+dist/
+.env
+.env.local

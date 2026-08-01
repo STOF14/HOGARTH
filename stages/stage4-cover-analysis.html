@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hogarth — Town Map (Stage 4, Cover Analysis)</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+  html,body{margin:0; padding:0; background:#0c0a12; overflow:hidden; height:100%; width:100%;}
+  #stage{position:fixed; inset:0;}
+  #stage canvas{
+    display:block; width:100%; height:100%;
+    image-rendering:pixelated; image-rendering:-moz-crisp-edges; image-rendering:crisp-edges;
+  }
+  #hud{
+    position:fixed; top:20px; left:20px; z-index:20;
+    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.08em;
+    text-transform:uppercase; color:rgba(240,236,226,0.75);
+    display:flex; flex-direction:column; gap:10px; max-width:280px;
+  }
+  #hud .title{color:#f0ece2;}
+  #hud .dim{opacity:0.55;}
+  #controls{ display:flex; flex-wrap:wrap; gap:8px; }
+  #controls button, #controls label{
+    font-family:'IBM Plex Mono', monospace; font-size:10px; letter-spacing:0.06em; text-transform:uppercase;
+    background:rgba(20,16,28,0.7); color:#f0ece2; border:1px solid rgba(240,236,226,0.3);
+    padding:8px 12px; cursor:pointer; display:inline-block;
+  }
+  #controls button:hover, #controls label:hover{ background:rgba(240,236,226,0.12); }
+  #fileInput{ display:none; }
+  #status{ font-size:10px; color:#ffcf8a; min-height:14px; opacity:0; transition:opacity 0.3s ease; }
+  #tooltip{
+    position:fixed; z-index:30; pointer-events:none;
+    font-family:'IBM Plex Mono', monospace; font-size:11px;
+    background:rgba(10,8,16,0.85); color:#f0ece2; border:1px solid rgba(240,236,226,0.25);
+    padding:6px 10px; opacity:0; transition:opacity 0.15s ease; white-space:nowrap;
+  }
+</style>
+</head>
+<body>
+
+<div id="stage"></div>
+<div id="hud">
+  <div><span class="title">HOGARTH</span> <span class="dim" id="hudCount">/ town — 0 plots, 0 lit</span></div>
+  <div id="controls">
+    <label for="fileInput">Upload cover(s)</label>
+    <input id="fileInput" type="file" accept="image/*" multiple>
+    <button id="addMock" type="button">+ Add mock (no cover)</button>
+  </div>
+  <div id="status"></div>
+</div>
+<div id="tooltip"></div>
+
+<script>
+(function(){
+  const stageEl = document.getElementById('stage');
+  const tooltip = document.getElementById('tooltip');
+  const hudCount = document.getElementById('hudCount');
+  const statusEl = document.getElementById('status');
+
+  function showStatus(msg){
+    statusEl.textContent = msg;
+    statusEl.style.opacity = '1';
+    clearTimeout(showStatus._t);
+    showStatus._t = setTimeout(() => { statusEl.style.opacity = '0'; }, 1800);
+  }
+
+  // ---------- color helpers ----------
+  function hexToInts(hex){
+    return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
+  }
+  function rgbToHex(r,g,b){
+    const h = v => Math.max(0,Math.min(255,Math.round(v))).toString(16).padStart(2,'0');
+    return `#${h(r)}${h(g)}${h(b)}`;
+  }
+  function rgbToHsl(r,g,b){
+    r/=255; g/=255; b/=255;
+    const max=Math.max(r,g,b), min=Math.min(r,g,b);
+    let h,s,l=(max+min)/2;
+    if (max===min){ h=0; s=0; }
+    else{
+      const d=max-min;
+      s = l>0.5 ? d/(2-max-min) : d/(max+min);
+      switch(max){
+        case r: h=(g-b)/d + (g<b?6:0); break;
+        case g: h=(b-r)/d + 2; break;
+        case b: h=(r-g)/d + 4; break;
+      }
+      h*=60;
+    }
+    return [h,s,l];
+  }
+  function hslToHex(h, s, l){
+    s/=100; l/=100;
+    const k = n => (n + h/30) % 12;
+    const a = s * Math.min(l, 1-l);
+    const f = n => l - a * Math.max(-1, Math.min(k(n)-3, Math.min(9-k(n), 1)));
+    const toHex = x => Math.round(x*255).toString(16).padStart(2,'0');
+    return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
+  }
+  function shade(hex, amt){
+    const [r,g,b] = hexToInts(hex);
+    return rgbToHex(r+amt*255, g+amt*255, b+amt*255);
+  }
+  function hashHue(str){
+    let h=0; for (let i=0;i<str.length;i++) h=(h*31+str.charCodeAt(i))>>>0;
+    return h % 360;
+  }
+
+  // real dominant-color extraction from a small canvas of pixel data
+  function extractDominantColor(canvas){
+    const ctx = canvas.getContext('2d');
+    const { width, height } = canvas;
+    const data = ctx.getImageData(0,0,width,height).data;
+    const buckets = {};
+    for (let i=0;i<data.length;i+=4){
+      const a = data[i+3];
+      if (a < 128) continue;
+      const [h,s,l] = rgbToHsl(data[i], data[i+1], data[i+2]);
+      if (s < 0.15 || l < 0.08 || l > 0.92) continue; // skip near gray/black/white
+      const bucket = Math.floor(h/15)*15;
+      if (!buckets[bucket]) buckets[bucket] = { count:0, sSum:0, lSum:0 };
+      buckets[bucket].count++;
+      buckets[bucket].sSum += s;
+      buckets[bucket].lSum += l;
+    }
+    let bestKey = null, bestCount = 0;
+    for (const k in buckets){ if (buckets[k].count > bestCount){ bestCount = buckets[k].count; bestKey = k; } }
+    if (bestKey === null){
+      let rS=0,gS=0,bS=0,n=0;
+      for (let i=0;i<data.length;i+=4){
+        if (data[i+3] < 128) continue;
+        rS+=data[i]; gS+=data[i+1]; bS+=data[i+2]; n++;
+      }
+      n = n || 1;
+      return rgbToHex(rS/n, gS/n, bS/n);
+    }
+    const b = buckets[bestKey];
+    const avgS = b.sSum/b.count, avgL = Math.min(0.62, Math.max(0.3, b.lSum/b.count));
+    return hslToHex(Number(bestKey), avgS*100, avgL*100);
+  }
+
+  function makeNearestTexture(canvas){
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    return tex;
+  }
+
+  function makeGroundTexture(){
+    const size=16, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+    const ctx=canvas.getContext('2d'); const img=ctx.createImageData(size,size);
+    const base=['#3c5a3e','#456647','#345036','#4d6f4f'];
+    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+      const n=Math.sin(x*1.7)*Math.cos(y*1.3)+Math.sin((x+y)*0.9);
+      const idx=Math.min(base.length-1,Math.max(0,Math.round((n+1.4)/0.9)));
+      const [r,g,b]=hexToInts(base[idx]); const i=(y*size+x)*4;
+      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+    }}
+    ctx.putImageData(img,0,0); return canvas;
+  }
+  function makeStreetTexture(){
+    const size=16, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+    const ctx=canvas.getContext('2d'); const img=ctx.createImageData(size,size);
+    const base=['#5a5560','#65606c','#4d4954'];
+    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+      const n=Math.sin(x*2.1+y*0.4);
+      const idx=Math.min(base.length-1,Math.max(0,Math.round((n+1)/0.9)));
+      const [r,g,b]=hexToInts(base[idx]); const i=(y*size+x)*4;
+      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+    }}
+    ctx.putImageData(img,0,0); return canvas;
+  }
+  function makeBuildingTexture(baseHex, accentHex){
+    const size=16, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+    const ctx=canvas.getContext('2d'); const img=ctx.createImageData(size,size);
+    const [br,bg,bb]=hexToInts(baseHex); const [ar,ag,ab]=hexToInts(accentHex);
+    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+      const i=(y*size+x)*4;
+      const isDoor = x>=6 && x<=9 && y>=9;
+      const isWindow = (x===3||x===12) && y>=3 && y<=6;
+      const brickLine = (y%4===0);
+      let r=br,g=bg,b=bb;
+      if (isDoor){ r=30; g=22; b=18; }
+      else if (isWindow){ r=ar; g=ag; b=ab; }
+      else if (brickLine){ r=Math.max(0,br-18); g=Math.max(0,bg-18); b=Math.max(0,bb-18); }
+      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+    }}
+    ctx.putImageData(img,0,0); return canvas;
+  }
+  function makeStarTexture(){
+    const size=6, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+    const ctx=canvas.getContext('2d'); ctx.fillStyle='#e8e2f0'; ctx.fillRect(0,0,size,size);
+    return canvas;
+  }
+  // placeholder "cover" for mock entries with no real file — a generated
+  // pixel pattern rather than a blank sign, so mock and real plots read consistently
+  function makePlaceholderCoverCanvas(baseHex){
+    const size=20, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+    const ctx=canvas.getContext('2d'); const img=ctx.createImageData(size,size);
+    const [br,bg,bb]=hexToInts(baseHex);
+    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+      const i=(y*size+x)*4;
+      const n = Math.sin(x*0.8+y*0.5)+Math.sin((x-y)*0.6);
+      const f = 0.75 + n*0.12;
+      img.data[i]=Math.min(255,br*f); img.data[i+1]=Math.min(255,bg*f); img.data[i+2]=Math.min(255,bb*f); img.data[i+3]=255;
+    }}
+    ctx.putImageData(img,0,0); return canvas;
+  }
+
+  // ---------- scene / camera / renderer ----------
+  const PIXEL_SCALE = 1/6;
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x14101c);
+  scene.fog = new THREE.Fog(0x14101c, 24, 46);
+
+  const camera = new THREE.OrthographicCamera(-1,1,1,-1,0.1,200);
+  const renderer = new THREE.WebGLRenderer({ antialias:false });
+  renderer.setPixelRatio(1);
+  stageEl.appendChild(renderer.domElement);
+
+  function resizeRenderer(){
+    const w = Math.max(64, Math.floor(window.innerWidth * PIXEL_SCALE));
+    const h = Math.max(48, Math.floor(window.innerHeight * PIXEL_SCALE));
+    renderer.setSize(w, h, false);
+  }
+  window.addEventListener('resize', () => { resizeRenderer(); updateCameraFit(); });
+  resizeRenderer();
+
+  scene.add(new THREE.AmbientLight(0x2e2a3c, 1.2));
+  const moon = new THREE.DirectionalLight(0xcfd0ff, 0.75); moon.position.set(-8,12,6); scene.add(moon);
+  const warmFill = new THREE.PointLight(0x6a4fd9, 0.4, 30); warmFill.position.set(6,4,-6); scene.add(warmFill);
+
+  const groundMat = new THREE.MeshStandardMaterial({ map: makeNearestTexture(makeGroundTexture()), roughness:1 });
+  const streetMat = new THREE.MeshStandardMaterial({ map: makeNearestTexture(makeStreetTexture()), roughness:1 });
+
+  let groundMesh=null, streetMesh=null;
+  const zSpacing = 6, rowStartZ = -6;
+
+  function rebuildGroundAndStreet(rows){
+    if (groundMesh){ scene.remove(groundMesh); groundMesh.geometry.dispose(); }
+    if (streetMesh){ scene.remove(streetMesh); streetMesh.geometry.dispose(); }
+    const minZ = rowStartZ - 5, maxZ = rowStartZ + (rows-1)*zSpacing + 5;
+    const length = maxZ - minZ, centerZ = (minZ+maxZ)/2;
+    groundMat.map.repeat.set(10, length/2.4);
+    streetMat.map.repeat.set(2, length/1.83);
+    groundMesh = new THREE.Mesh(new THREE.PlaneGeometry(24, length), groundMat);
+    groundMesh.rotation.x = -Math.PI/2; groundMesh.position.z = centerZ; scene.add(groundMesh);
+    streetMesh = new THREE.Mesh(new THREE.PlaneGeometry(3, length), streetMat);
+    streetMesh.rotation.x = -Math.PI/2; streetMesh.position.y = 0.01; streetMesh.position.z = centerZ; scene.add(streetMesh);
+  }
+
+  let builtRows = 0;
+  function updateCameraFit(){
+    const rows = Math.max(1, builtRows);
+    const midZ = rowStartZ + (rows-1)*(zSpacing/2);
+    const vs = 11 + rows*2.0;
+    const a = window.innerWidth/window.innerHeight;
+    camera.left=-vs*a; camera.right=vs*a; camera.top=vs; camera.bottom=-vs;
+    const dist = 15 + rows*2.0;
+    camera.position.set(dist, dist*0.875, dist*0.6+midZ);
+    camera.lookAt(0,0,midZ);
+    camera.updateProjectionMatrix();
+  }
+
+  // ---------- plots ----------
+  const plotGroup = new THREE.Group();
+  scene.add(plotGroup);
+  const plots = [];
+
+  function computeSlotPosition(n){
+    const side = n%2===0 ? -1 : 1;
+    const row = Math.floor(n/2);
+    return { x: side*5.5, z: rowStartZ + row*zSpacing, side };
+  }
+
+  function createPlot(index, title, baseHex, accentHex, coverCanvas){
+    const { x, z, side } = computeSlotPosition(index);
+    const g = new THREE.Group();
+    g.position.set(x, 0, z);
+
+    const base = new THREE.Mesh(
+      new THREE.BoxGeometry(2.6, 0.15, 2.6),
+      new THREE.MeshStandardMaterial({ color:0x2a2634, roughness:1 })
+    );
+    base.position.y = 0.075; g.add(base);
+
+    const facadeTex = makeNearestTexture(makeBuildingTexture(baseHex, accentHex));
+    const building = new THREE.Mesh(
+      new THREE.BoxGeometry(1.6,1.6,1.6),
+      new THREE.MeshStandardMaterial({ map: facadeTex, roughness:0.9 })
+    );
+    building.position.y = 0.15+0.8; g.add(building);
+
+    const roof = new THREE.Mesh(
+      new THREE.ConeGeometry(1.3,0.9,4),
+      new THREE.MeshStandardMaterial({ color:0x1c1822, roughness:1 })
+    );
+    roof.rotation.y = Math.PI/4; roof.position.y = 0.15+1.6+0.45; g.add(roof);
+
+    // sign bearing the analyzed cover (or placeholder pattern for mock entries)
+    const signTex = makeNearestTexture(coverCanvas);
+    const sign = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.9, 0.9),
+      new THREE.MeshStandardMaterial({ map: signTex, roughness:1, side: THREE.DoubleSide })
+    );
+    sign.position.set(0, 1.0, 1.35);
+    g.add(sign);
+    const signPost = new THREE.Mesh(
+      new THREE.BoxGeometry(0.08, 0.5, 0.08),
+      new THREE.MeshStandardMaterial({ color:0x1c1822 })
+    );
+    signPost.position.set(0, 0.4, 1.35);
+    g.add(signPost);
+
+    const lampGroup = new THREE.Group();
+    lampGroup.position.set(-side*1.7, 0, 0.9);
+    const pole = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05,0.06,1.8,6),
+      new THREE.MeshStandardMaterial({ color:0x1c1822, roughness:0.8 })
+    );
+    pole.position.y = 0.9; lampGroup.add(pole);
+
+    const bulbMat = new THREE.MeshStandardMaterial({
+      color:0x3a3640, emissive:0x000000, emissiveIntensity:0, roughness:0.5
+    });
+    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.16,8,8), bulbMat);
+    bulb.position.y = 1.85; lampGroup.add(bulb);
+
+    const glowLight = new THREE.PointLight(0xffcf8a, 0, 4);
+    glowLight.position.y = 1.85; lampGroup.add(glowLight);
+    g.add(lampGroup);
+
+    plotGroup.add(g);
+    return { group:g, building, roof, sign, bulbMat, glowLight, lit:false, index, label:title };
+  }
+
+  function igniteLamp(plot, colorHex){
+    const targetColor = parseInt(colorHex.replace('#','0x'));
+    plot.bulbMat.emissive.setHex(targetColor);
+    plot.glowLight.color.setHex(targetColor);
+    const start = performance.now();
+    function step(now){
+      const t = Math.min((now-start)/500, 1);
+      plot.bulbMat.emissiveIntensity = t;
+      plot.glowLight.intensity = t*1.15;
+      if (t<1) requestAnimationFrame(step);
+      else { plot.lit = true; updateHud(); }
+    }
+    requestAnimationFrame(step);
+  }
+
+  function placePlot(title, baseHex, accentHex, lampHex, coverCanvas){
+    const n = plots.length;
+    const rowsNeeded = Math.floor(n/2)+1;
+    if (rowsNeeded > builtRows){ builtRows = rowsNeeded; rebuildGroundAndStreet(builtRows); }
+    const plot = createPlot(n, title, baseHex, accentHex, coverCanvas);
+    plots.push(plot);
+    updateCameraFit();
+    updateHud();
+    setTimeout(() => igniteLamp(plot, lampHex), 380);
+  }
+
+  function updateHud(){
+    const lit = plots.filter(p=>p.lit).length;
+    hudCount.textContent = `/ town — ${plots.length} plot${plots.length===1?'':'s'}, ${lit} lit`;
+  }
+
+  // ---------- real upload + analysis path ----------
+  function handleFile(file){
+    showStatus(`Analyzing "${file.name}"…`);
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const s = Math.min(img.width, img.height);
+      const sx = (img.width-s)/2, sy = (img.height-s)/2;
+      const thumb = document.createElement('canvas');
+      thumb.width = 20; thumb.height = 20;
+      const tctx = thumb.getContext('2d');
+      tctx.imageSmoothingEnabled = false;
+      tctx.drawImage(img, sx, sy, s, s, 0, 0, 20, 20);
+      URL.revokeObjectURL(url);
+
+      const dominant = extractDominantColor(thumb);
+      const baseHex = shade(dominant, -0.28);
+      const accentHex = shade(dominant, 0.32);
+      const title = file.name.replace(/\.[^.]+$/, '');
+      placePlot(title, baseHex, accentHex, dominant, thumb);
+    };
+    img.onerror = () => showStatus(`Could not read "${file.name}"`);
+    img.src = url;
+  }
+
+  document.getElementById('fileInput').addEventListener('change', (e) => {
+    const files = Array.from(e.target.files || []);
+    files.forEach(handleFile);
+    e.target.value = '';
+  });
+
+  // ---------- mock path (no real cover) ----------
+  const mockTitles = ['Untitled Draft','Working Copy','No Cover Yet','Placeholder Vol.','Draft Pages','Scan Batch'];
+  let mockCounter = 0;
+  document.getElementById('addMock').addEventListener('click', () => {
+    mockCounter++;
+    const title = `${mockTitles[(mockCounter-1)%mockTitles.length]} #${mockCounter}`;
+    const hue = hashHue(title);
+    const dominant = hslToHex(hue, 40, 46);
+    const baseHex = shade(dominant, -0.28);
+    const accentHex = shade(dominant, 0.32);
+    placePlot(title, baseHex, accentHex, dominant, makePlaceholderCoverCanvas(dominant));
+  });
+
+  // seed one row so the town isn't empty on load
+  document.getElementById('addMock').click();
+  document.getElementById('addMock').click();
+
+  // stars
+  const starGeo = new THREE.BufferGeometry();
+  const starCount = 160;
+  const starPos = new Float32Array(starCount*3);
+  for (let i=0;i<starCount;i++){
+    starPos[i*3]=(Math.random()-0.5)*70; starPos[i*3+1]=6+Math.random()*16; starPos[i*3+2]=(Math.random()-0.5)*70;
+  }
+  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos,3));
+  const starMat = new THREE.PointsMaterial({ size:0.1, map:makeNearestTexture(makeStarTexture()), transparent:true, depthWrite:false });
+  scene.add(new THREE.Points(starGeo, starMat));
+
+  // ---------- hover / click ----------
+  const raycaster = new THREE.Raycaster();
+  const mouse = new THREE.Vector2();
+  let hovered = null;
+
+  window.addEventListener('mousemove', (e) => {
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((e.clientX-rect.left)/rect.width)*2-1;
+    mouse.y = -((e.clientY-rect.top)/rect.height)*2+1;
+    tooltip.style.left = (e.clientX+14)+'px';
+    tooltip.style.top = (e.clientY+14)+'px';
+  });
+  window.addEventListener('click', (e) => {
+    if (e.target.closest('#hud')) return;
+    if (hovered) console.log('Would open reader for:', hovered.label, '(wired in Stage 5)');
+  });
+
+  function updateHover(){
+    raycaster.setFromCamera(mouse, camera);
+    const hits = raycaster.intersectObjects(plots.map(p=>p.building));
+    if (hits.length){
+      const hitPlot = plots.find(p=>p.building===hits[0].object);
+      if (hovered!==hitPlot){ if(hovered) hovered.group.scale.set(1,1,1); hovered=hitPlot; }
+      hovered.group.scale.set(1.05,1.05,1.05);
+      tooltip.textContent = hovered.lit ? hovered.label : `${hovered.label} (analyzing…)`;
+      tooltip.style.opacity = '1';
+    } else {
+      if (hovered) hovered.group.scale.set(1,1,1);
+      hovered = null; tooltip.style.opacity = '0';
+    }
+  }
+
+  function animate(){
+    requestAnimationFrame(animate);
+    updateHover();
+    renderer.render(scene, camera);
+  }
+  animate();
+})();
+</script>
+
+</body>
+</html>
