@@ -68,7 +68,11 @@ export default function TownScene({ scene, camera, container, appState }){
             }
           } catch (err){
             // If decoding failed (likely RAR support), show a helpful message and offer fallback
-            alert(err.message || 'Could not decode archive.');
+            if (/CBR \(RAR\) archives are not supported/i.test(err.message || '')){
+              showRarHelp(f && f.name);
+            } else {
+              alert(err.message || 'Could not decode archive.');
+            }
           }
         } else if (/image\//i.test(f.type)){
           const img = new Image(); const url = URL.createObjectURL(f); img.onload = ()=>{
@@ -115,8 +119,31 @@ export default function TownScene({ scene, camera, container, appState }){
         inputAny.removeEventListener('change', onInputChange);
         if (input.parentNode) input.parentNode.removeChild(input);
         if (inputAny.parentNode) inputAny.parentNode.removeChild(inputAny);
+        const help = document.getElementById('hogarth-rar-help'); if (help && help.parentNode) help.parentNode.removeChild(help);
       };
       updateHud();
+    },
+    // Show a small help dialog explaining RAR/CBR limitations and conversion options
+    showRarHelp(filename){
+      function makeLink(href, text){ return `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`; }
+      const existing = document.getElementById('hogarth-rar-help');
+      if (existing) return;
+      const el = document.createElement('div'); el.id = 'hogarth-rar-help';
+      el.style.position = 'fixed'; el.style.left='50%'; el.style.top='18%'; el.style.transform='translateX(-50%)'; el.style.zIndex='120';
+      el.style.background='rgba(20,16,28,0.98)'; el.style.color='#f0ece2'; el.style.border='1px solid rgba(240,236,226,0.2)'; el.style.padding='14px'; el.style.maxWidth='560px'; el.style.fontFamily='IBM Plex Mono, monospace'; el.style.fontSize='13px'; el.style.boxShadow='0 6px 18px rgba(0,0,0,0.6)';
+      const fname = filename ? ` "${filename}"` : '';
+      el.innerHTML = `
+        <div style="margin-bottom:8px; font-weight:600;">CBR (RAR) not supported</div>
+        <div style="margin-bottom:8px; color:rgba(240,236,226,0.9)">The file${fname} appears to be a RAR archive. RAR decoding isn't available in this build. Convert to CBZ (ZIP) or upload from a desktop.</div>
+        <div style="margin-bottom:8px">Try one of these options:</div>
+        <ul style="margin:0 0 10px 18px; color:rgba(240,236,226,0.85)">
+          <li>Use an online converter: ${makeLink('https://convertio.co/rar-zip/','Convert RAR → ZIP')}</li>
+          <li>On desktop: rename/move to a computer and create a ZIP (.cbz)</li>
+        </ul>
+        <div style="text-align:right"><button id="hogarth-rar-close" style="padding:6px 10px">OK</button></div>
+      `;
+      document.body.appendChild(el);
+      el.querySelector('#hogarth-rar-close').addEventListener('click', ()=>{ if (el.parentNode) el.parentNode.removeChild(el); });
     },
     async exit(){
       mounted = false;
