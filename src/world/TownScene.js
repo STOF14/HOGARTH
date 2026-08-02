@@ -33,22 +33,52 @@ export default function TownScene({ scene, camera, container, appState }){
       const uploadBtn = document.createElement('button'); uploadBtn.textContent = 'Upload';
       const altBtn = document.createElement('button'); altBtn.textContent = 'Select any file'; altBtn.title = 'Use this if your device does not show .cbr/.rar in the picker';
       const mockBtn = document.createElement('button'); mockBtn.textContent = 'Mock Add';
-      // Stage nav buttons
-      const stage1 = document.createElement('button'); stage1.textContent = 'Stage 1';
-      const stage2 = document.createElement('button'); stage2.textContent = 'Stage 2';
-      const stage3 = document.createElement('button'); stage3.textContent = 'Stage 3';
-      const stage4 = document.createElement('button'); stage4.textContent = 'Stage 4';
-      const stage5 = document.createElement('button'); stage5.textContent = 'Stage 5';
       hudControls.appendChild(uploadBtn); hudControls.appendChild(altBtn); hudControls.appendChild(mockBtn);
-      hudControls.appendChild(stage1); hudControls.appendChild(stage2); hudControls.appendChild(stage3); hudControls.appendChild(stage4); hudControls.appendChild(stage5);
       document.body.appendChild(input);
       document.body.appendChild(inputAny);
+
+      // Legacy per-stage demo pages, kept for reference in public/stages/.
+      // Only shown when explicitly requested (?debug=1) — these are
+      // developer scaffolding, not part of the real app's navigation.
+      const debugMode = new URLSearchParams(window.location.search).has('debug');
+      if (debugMode){
+        const stageLabels = ['Stage 1', 'Stage 2', 'Stage 3', 'Stage 4', 'Stage 5'];
+        stageLabels.forEach((label, i) => {
+          const btn = document.createElement('button');
+          btn.textContent = label;
+          btn.addEventListener('click', () => window.open(`/stages/stage${i+1}-${['boot','town-static','town-dynamic','cover-analysis','enter-reader'][i]}.html`, '_blank'));
+          hudControls.appendChild(btn);
+        });
+      }
 
       uploadBtn.addEventListener('click', ()=> input.click());
       altBtn.addEventListener('click', ()=> inputAny.click());
       const onInputChange = async (e)=>{ await processFile(e.target.files && e.target.files[0]); };
       input.addEventListener('change', onInputChange);
       inputAny.addEventListener('change', onInputChange);
+
+      // Show a small help dialog explaining RAR/CBR limitations and conversion options
+      function showRarHelp(filename){
+        function makeLink(href, text){ return `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`; }
+        const existing = document.getElementById('hogarth-rar-help');
+        if (existing) return;
+        const el = document.createElement('div'); el.id = 'hogarth-rar-help';
+        el.style.position = 'fixed'; el.style.left='50%'; el.style.top='18%'; el.style.transform='translateX(-50%)'; el.style.zIndex='120';
+        el.style.background='rgba(20,16,28,0.98)'; el.style.color='#f0ece2'; el.style.border='1px solid rgba(240,236,226,0.2)'; el.style.padding='14px'; el.style.maxWidth='560px'; el.style.fontFamily='IBM Plex Mono, monospace'; el.style.fontSize='13px'; el.style.boxShadow='0 6px 18px rgba(0,0,0,0.6)';
+        const fname = filename ? ` "${filename}"` : '';
+        el.innerHTML = `
+          <div style="margin-bottom:8px; font-weight:600;">CBR (RAR) not supported</div>
+          <div style="margin-bottom:8px; color:rgba(240,236,226,0.9)">The file${fname} appears to be a RAR archive. RAR decoding isn't available in this build. Convert to CBZ (ZIP) or upload from a desktop.</div>
+          <div style="margin-bottom:8px">Try one of these options:</div>
+          <ul style="margin:0 0 10px 18px; color:rgba(240,236,226,0.85)">
+            <li>Use an online converter: ${makeLink('https://convertio.co/rar-zip/','Convert RAR → ZIP')}</li>
+            <li>On desktop: rename/move to a computer and create a ZIP (.cbz)</li>
+          </ul>
+          <div style="text-align:right"><button id="hogarth-rar-close" style="padding:6px 10px">OK</button></div>
+        `;
+        document.body.appendChild(el);
+        el.querySelector('#hogarth-rar-close').addEventListener('click', ()=>{ if (el.parentNode) el.parentNode.removeChild(el); });
+      }
 
       async function processFile(f){
         if (!f) return;
@@ -85,13 +115,6 @@ export default function TownScene({ scene, camera, container, appState }){
       // mock button handler
       mockBtn.addEventListener('click', ()=>{ const title = `Mock #${town.plots.length+1}`; town.addPlot(title, makePlaceholderCoverCanvas('#8dd6ff')); updateHud(); });
 
-      // stage navigation handlers (open legacy stage HTML inside SPA)
-      stage1.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage1-boot.html' }));
-      stage2.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage2-town-static.html' }));
-      stage3.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage3-town-dynamic.html' }));
-      stage4.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage4-cover-analysis.html' }));
-      stage5.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage5-enter-reader.html' }));
-
       // hover + click handling
       const raycaster = new THREE.Raycaster();
       const mouse = new THREE.Vector2();
@@ -122,28 +145,6 @@ export default function TownScene({ scene, camera, container, appState }){
         const help = document.getElementById('hogarth-rar-help'); if (help && help.parentNode) help.parentNode.removeChild(help);
       };
       updateHud();
-    },
-    // Show a small help dialog explaining RAR/CBR limitations and conversion options
-    showRarHelp(filename){
-      function makeLink(href, text){ return `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`; }
-      const existing = document.getElementById('hogarth-rar-help');
-      if (existing) return;
-      const el = document.createElement('div'); el.id = 'hogarth-rar-help';
-      el.style.position = 'fixed'; el.style.left='50%'; el.style.top='18%'; el.style.transform='translateX(-50%)'; el.style.zIndex='120';
-      el.style.background='rgba(20,16,28,0.98)'; el.style.color='#f0ece2'; el.style.border='1px solid rgba(240,236,226,0.2)'; el.style.padding='14px'; el.style.maxWidth='560px'; el.style.fontFamily='IBM Plex Mono, monospace'; el.style.fontSize='13px'; el.style.boxShadow='0 6px 18px rgba(0,0,0,0.6)';
-      const fname = filename ? ` "${filename}"` : '';
-      el.innerHTML = `
-        <div style="margin-bottom:8px; font-weight:600;">CBR (RAR) not supported</div>
-        <div style="margin-bottom:8px; color:rgba(240,236,226,0.9)">The file${fname} appears to be a RAR archive. RAR decoding isn't available in this build. Convert to CBZ (ZIP) or upload from a desktop.</div>
-        <div style="margin-bottom:8px">Try one of these options:</div>
-        <ul style="margin:0 0 10px 18px; color:rgba(240,236,226,0.85)">
-          <li>Use an online converter: ${makeLink('https://convertio.co/rar-zip/','Convert RAR → ZIP')}</li>
-          <li>On desktop: rename/move to a computer and create a ZIP (.cbz)</li>
-        </ul>
-        <div style="text-align:right"><button id="hogarth-rar-close" style="padding:6px 10px">OK</button></div>
-      `;
-      document.body.appendChild(el);
-      el.querySelector('#hogarth-rar-close').addEventListener('click', ()=>{ if (el.parentNode) el.parentNode.removeChild(el); });
     },
     async exit(){
       mounted = false;

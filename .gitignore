@@ -7,9 +7,12 @@ Thumbs.db
 .idea/
 *.swp
 
-# Future tooling (no build step exists yet, but reserving these
-# in case the repo grows a bundler/dev server later)
+# Build / deps
 node_modules/
 dist/
 .env
 .env.local
+
+# Test artifacts
+test-results/
+playwright-report/

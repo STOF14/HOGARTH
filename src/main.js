@@ -4,14 +4,15 @@ import { AppState } from './core/appState.js';
 import BootScene from './boot/BootScene.js';
 import TownScene from './world/TownScene.js';
 import ReaderPanel from './reader/ReaderPanel.js';
-import StageScene from './world/StageScene.js';
 
 // Minimal app bootstrap for Vite + Three (r128)
+const appEl = document.getElementById('app');
+
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x14101c);
 
 const camera = new THREE.OrthographicCamera(-10,10,10,-10,0.1,200);
-const { renderer, resize } = createPixelRenderer({ pixelScale: 1/6, antialias: false, parent: document.body });
+const { renderer, resize } = createPixelRenderer({ pixelScale: 1/6, antialias: false, parent: appEl });
 
 function onWindowResize(){
   const a = window.innerWidth / window.innerHeight;
@@ -27,13 +28,11 @@ const ambient = new THREE.AmbientLight(0x2e2a3c, 1.2);
 scene.add(ambient);
 
 const appState = new AppState();
-const boot = BootScene({ scene, camera, container: document.body, appState });
-const townScene = TownScene({ scene, camera, container: document.body, appState });
+const boot = BootScene({ scene, camera, container: appEl, appState });
+const townScene = TownScene({ scene, camera, container: appEl, appState });
 appState.register('BOOT', boot);
 appState.register('TOWN', townScene);
-const stageScene = StageScene({ container: document.body, appState });
-appState.register('STAGE', stageScene);
-const readerPanel = ReaderPanel({ container: document.body, appState });
+const readerPanel = ReaderPanel({ container: appEl, appState });
 appState.register('READING', readerPanel);
 appState.go('BOOT');
 

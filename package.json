@@ -9,12 +9,11 @@
     "test:ui": "playwright test"
   },
   "dependencies": {
-    "three": "^0.128.0"
+    "three": "^0.128.0",
+    "jszip": "^3.10.1"
   },
   "devDependencies": {
     "vite": "^8.2.0",
-    "@playwright/test": "^1.39.1",
-    "jszip": "^3.10.1",
-    "unrar-js": "^1.2.0"
+    "@playwright/test": "^1.39.1"
   }
 }
