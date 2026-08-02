@@ -1,0 +1,127 @@
+import * as THREE from 'three';
+import { Town } from './town.js';
+import { decodeComicArchive } from '../reader/archive.js';
+import { makePlaceholderCoverCanvas } from './textures.js';
+
+export default function TownScene({ scene, camera, container, appState }){
+  let mounted = false;
+  let town = null;
+  const hud = document.createElement('div');
+  hud.id = 'hogarth-hud'; hud.style.position='fixed'; hud.style.top='18px'; hud.style.left='18px'; hud.style.zIndex='40';
+  // structured HUD: label + controls so we can update text without clobbering buttons
+  const hudLabel = document.createElement('div'); hudLabel.style.marginBottom = '6px'; hud.appendChild(hudLabel);
+  const hudControls = document.createElement('div'); hudControls.style.display = 'flex'; hudControls.style.gap = '8px'; hud.appendChild(hudControls);
+
+  function updateHud(){
+    const count = town ? town.plots.length : 0;
+    hudLabel.textContent = `Town — ${count} plot${count===1?'':'s'}`;
+  }
+
+  return {
+    async enter(){
+      mounted = true;
+      town = new Town(scene, camera);
+      container.appendChild(hud);
+
+      // file input + mock button
+      const input = document.createElement('input'); input.type='file';
+      // Accept common archive extensions and RAR MIME types so iOS shows them where possible
+      input.accept = 'image/*,.cbz,.zip,.cbr,.rar,application/x-rar-compressed,application/vnd.rar,application/octet-stream';
+      input.style.display='none';
+      // Fallback input without accept for platforms that hide custom extensions (iPad iOS picker)
+      const inputAny = document.createElement('input'); inputAny.type='file'; inputAny.style.display='none';
+      const uploadBtn = document.createElement('button'); uploadBtn.textContent = 'Upload';
+      const altBtn = document.createElement('button'); altBtn.textContent = 'Select any file'; altBtn.title = 'Use this if your device does not show .cbr/.rar in the picker';
+      const mockBtn = document.createElement('button'); mockBtn.textContent = 'Mock Add';
+      // Stage nav buttons
+      const stage1 = document.createElement('button'); stage1.textContent = 'Stage 1';
+      const stage2 = document.createElement('button'); stage2.textContent = 'Stage 2';
+      const stage3 = document.createElement('button'); stage3.textContent = 'Stage 3';
+      const stage4 = document.createElement('button'); stage4.textContent = 'Stage 4';
+      const stage5 = document.createElement('button'); stage5.textContent = 'Stage 5';
+      hudControls.appendChild(uploadBtn); hudControls.appendChild(altBtn); hudControls.appendChild(mockBtn);
+      hudControls.appendChild(stage1); hudControls.appendChild(stage2); hudControls.appendChild(stage3); hudControls.appendChild(stage4); hudControls.appendChild(stage5);
+      document.body.appendChild(input);
+      document.body.appendChild(inputAny);
+
+      uploadBtn.addEventListener('click', ()=> input.click());
+      altBtn.addEventListener('click', ()=> inputAny.click());
+      const onInputChange = async (e)=>{ await processFile(e.target.files && e.target.files[0]); };
+      input.addEventListener('change', onInputChange);
+      inputAny.addEventListener('change', onInputChange);
+
+      async function processFile(f){
+        if (!f) return;
+        // If this looks like an archive, try decode path
+        if (/\.(cbz|zip|cbr|rar)$/i.test(f.name)){
+          // decode archive and add first page as cover (simple flow)
+          try{
+            const { files, cache } = await decodeComicArchive(f, (i,n)=>{ /* progress */ });
+            if (files.length){
+              const url = cache.get(0);
+              const img = new Image(); img.crossOrigin='anonymous'; img.src = url;
+              img.onload = ()=>{
+                const s = Math.min(img.width, img.height); const sx=(img.width-s)/2, sy=(img.height-s)/2; const thumb=document.createElement('canvas'); thumb.width=20; thumb.height=20; const tctx=thumb.getContext('2d'); tctx.imageSmoothingEnabled=false; tctx.drawImage(img, sx, sy, s, s, 0, 0, 20,20);
+                town.addPlot(f.name.replace(/\.[^.]+$/,''), thumb);
+                updateHud();
+              };
+            }
+          } catch (err){
+            // If decoding failed (likely RAR support), show a helpful message and offer fallback
+            alert(err.message || 'Could not decode archive.');
+          }
+        } else if (/image\//i.test(f.type)){
+          const img = new Image(); const url = URL.createObjectURL(f); img.onload = ()=>{
+            const s = Math.min(img.width, img.height); const sx=(img.width-s)/2, sy=(img.height-s)/2; const thumb=document.createElement('canvas'); thumb.width=20; thumb.height=20; const tctx=thumb.getContext('2d'); tctx.imageSmoothingEnabled=false; tctx.drawImage(img, sx, sy, s, s, 0, 0, 20,20); URL.revokeObjectURL(url);
+            town.addPlot(f.name.replace(/\.[^.]+$/,''), thumb); updateHud();
+          }; img.src = url;
+        }
+      }
+      
+      // mock button handler
+      mockBtn.addEventListener('click', ()=>{ const title = `Mock #${town.plots.length+1}`; town.addPlot(title, makePlaceholderCoverCanvas('#8dd6ff')); updateHud(); });
+
+      // stage navigation handlers (open legacy stage HTML inside SPA)
+      stage1.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage1-boot.html' }));
+      stage2.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage2-town-static.html' }));
+      stage3.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage3-town-dynamic.html' }));
+      stage4.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage4-cover-analysis.html' }));
+      stage5.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage5-enter-reader.html' }));
+
+      // hover + click handling
+      const raycaster = new THREE.Raycaster();
+      const mouse = new THREE.Vector2();
+      let hovered = null;
+      function onMove(e){
+        mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = - (e.clientY / window.innerHeight) * 2 + 1;
+      }
+      function onClick(e){
+        raycaster.setFromCamera(mouse, camera);
+        const hits = raycaster.intersectObjects(town.plots.map(p => p.building));
+        if (hits.length){
+          const hitPlot = town.plots.find(p => p.building === hits[0].object);
+          if (hitPlot) appState.go('READING', { title: hitPlot.label, coverCanvas: hitPlot.coverCanvas });
+        }
+      }
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('click', onClick);
+
+      // Store references for cleanup on exit
+      this._cleanup = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('click', onClick);
+        input.removeEventListener('change', onInputChange);
+        inputAny.removeEventListener('change', onInputChange);
+        if (input.parentNode) input.parentNode.removeChild(input);
+        if (inputAny.parentNode) inputAny.parentNode.removeChild(inputAny);
+      };
+      updateHud();
+    },
+    async exit(){
+      mounted = false;
+      if (this._cleanup) { try { this._cleanup(); } catch(e){} this._cleanup = null; }
+      const el = document.getElementById('hogarth-hud'); if (el && el.parentNode) el.parentNode.removeChild(el);
+    }
+  };
+}

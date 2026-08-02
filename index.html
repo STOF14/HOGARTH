@@ -106,50 +106,9 @@
 </style>
 </head>
 <body>
-<main>
-  <section class="hero">
-    <div>
-      <p class="eyebrow">Hogarth prototype</p>
-      <h1>Boot sequence, town map, comic reader.</h1>
-      <p class="lede">This repo is a plain static HTML prototype, so it can be deployed on Vercel without a build step. Stage 5 is the most complete entry point and the one this landing page promotes first.</p>
-      <div class="actions">
-        <a class="button primary" href="/stages/stage5-enter-reader.html">Launch Stage 5</a>
-        <a class="button" href="/stages/stage1-boot.html">Start at Stage 1</a>
-      </div>
-    </div>
-    <aside class="card">
-      <h2>Vercel-ready</h2>
-      <p>Deploy this repository as a static site. Vercel can serve the root <code>index.html</code> and the stage files directly, with no install or build command required.</p>
-    </aside>
-  </section>
-  <section class="stages" aria-label="Stage links">
-    <div class="stage">
-      <b>Stage 1</b>
-      <span>Boot sequence and first collision.</span>
-      <a href="/stages/stage1-boot.html">Open</a>
-    </div>
-    <div class="stage">
-      <b>Stage 2</b>
-      <span>Static town layout and visual pass.</span>
-      <a href="/stages/stage2-town-static.html">Open</a>
-    </div>
-    <div class="stage">
-      <b>Stage 3</b>
-      <span>Dynamic plot growth and camera fit.</span>
-      <a href="/stages/stage3-town-dynamic.html">Open</a>
-    </div>
-    <div class="stage">
-      <b>Stage 4</b>
-      <span>Cover analysis from uploaded art.</span>
-      <a href="/stages/stage4-cover-analysis.html">Open</a>
-    </div>
-    <div class="stage">
-      <b>Stage 5</b>
-      <span>Reader handoff and the current prototype surface.</span>
-      <a href="/stages/stage5-enter-reader.html">Open</a>
-    </div>
-  </section>
-  <div class="footer">Static hosting target: Vercel</div>
 </main>
+<div id="app" style="position:fixed;inset:0;overflow:hidden;"></div>
+<div style="position:fixed;left:12px;bottom:12px;z-index:80"><a href="/legacy-landing.html">Legacy landing & stages</a></div>
+<script type="module" src="/src/main.js"></script>
 </body>
 </html>
