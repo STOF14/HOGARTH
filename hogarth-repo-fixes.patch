@@ -1,0 +1,3846 @@
+From c1d9813c5e4eaf8bedff03347a25ea5db2abd96e Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Sun, 2 Aug 2026 20:40:13 +0000
+Subject: [PATCH 1/2] Fix broken install, dead boot sequence, and
+ duplicate/unreachable files
+
+- package.json: remove unrar-js@^1.2.0 (version doesn't exist, npm install
+  failed outright); promote jszip to a real dependency
+- archive.js: rewrite to use jszip for CBZ (bundled, reliable) instead of
+  runtime-loading libarchive.js from a CDN; drop the broken unrar-js RAR
+  fallback chain in favor of an honest 'not supported, convert to CBZ'
+  message
+- index.html: rebuild missing <main> markup (CSS had no matching HTML),
+  mount the app into #app instead of document.body
+- BootScene.js: port the real boot sequence (collision, impact squash,
+  camera shake, explosion with debris colored from the bodies' own
+  textures, pixel-dissolve wipe, pixel wordmark) -- it was a 1200ms stub
+- textures.js: add the planet/flash/particle generators BootScene needs
+- TownScene.js: fix showRarHelp being called out of scope (would have
+  thrown ReferenceError on every failed RAR upload); gate legacy
+  stage-nav buttons behind ?debug=1 instead of always showing dev tooling
+- remove dead code: ReaderScene.js (unused duplicate of ReaderPanel.js),
+  StageScene.js (iframe-based legacy loader, no longer referenced)
+- deduplicate stages/ and legacy-prototype/stages/ (had already drifted --
+  one variable name typo differed between copies) into a single copy
+- move stages/ and legacy-landing.html into public/ so vite build
+  actually includes them in dist/ (they were being silently dropped from
+  production builds before)
+- tests/cbr.spec.js: update to test the new honest CBR-rejection behavior
+  instead of the old 'try to decode regardless of extension' behavior
+- add test-results/ and playwright-report/ to .gitignore
+---
+ .gitignore                                    |   7 +-
+ index.html                                    | 118 +--
+ legacy-prototype/stages/stage1-boot.html      | 421 ---------
+ .../stages/stage5-enter-reader.html           | 856 ------------------
+ package-lock.json                             |  51 +-
+ package.json                                  |   7 +-
+ .../legacy-landing.html                       |   0
+ {stages => public/stages}/stage1-boot.html    |   0
+ .../stages/stage2-town-static.html            |   0
+ .../stages/stage3-town-dynamic.html           |   0
+ .../stages/stage4-cover-analysis.html         |   0
+ .../stages}/stage5-enter-reader.html          |   0
+ src/boot/BootScene.js                         | 276 +++++-
+ src/main.js                                   |  13 +-
+ src/reader/ReaderScene.js                     |  25 -
+ src/reader/archive.js                         | 142 +--
+ src/world/StageScene.js                       |  25 -
+ src/world/TownScene.js                        |  73 +-
+ src/world/textures.js                         |  81 ++
+ stages/stage2-town-static.html                | 326 -------
+ stages/stage3-town-dynamic.html               | 387 --------
+ stages/stage4-cover-analysis.html             | 473 ----------
+ test-results/.last-run.json                   |   4 -
+ tests/cbr.spec.js                             |  27 +-
+ 24 files changed, 487 insertions(+), 2825 deletions(-)
+ delete mode 100644 legacy-prototype/stages/stage1-boot.html
+ delete mode 100644 legacy-prototype/stages/stage5-enter-reader.html
+ rename legacy-landing.html => public/legacy-landing.html (100%)
+ rename {stages => public/stages}/stage1-boot.html (100%)
+ rename {legacy-prototype => public}/stages/stage2-town-static.html (100%)
+ rename {legacy-prototype => public}/stages/stage3-town-dynamic.html (100%)
+ rename {legacy-prototype => public}/stages/stage4-cover-analysis.html (100%)
+ rename {stages => public/stages}/stage5-enter-reader.html (100%)
+ delete mode 100644 src/reader/ReaderScene.js
+ delete mode 100644 src/world/StageScene.js
+ delete mode 100644 stages/stage2-town-static.html
+ delete mode 100644 stages/stage3-town-dynamic.html
+ delete mode 100644 stages/stage4-cover-analysis.html
+ delete mode 100644 test-results/.last-run.json
+
+diff --git a/.gitignore b/.gitignore
+index f9272a9..e2ea0ec 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -7,9 +7,12 @@ Thumbs.db
+ .idea/
+ *.swp
+ 
+-# Future tooling (no build step exists yet, but reserving these
+-# in case the repo grows a bundler/dev server later)
++# Build / deps
+ node_modules/
+ dist/
+ .env
+ .env.local
++
++# Test artifacts
++test-results/
++playwright-report/
+diff --git a/index.html b/index.html
+index c56ebd9..82a65cc 100644
+--- a/index.html
++++ b/index.html
+@@ -4,111 +4,25 @@
+ <meta charset="UTF-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1.0">
+ <title>Hogarth</title>
++<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+ <style>
+-  :root{
+-    --bg:#09070d;
+-    --panel:rgba(21,17,30,0.84);
+-    --panel-strong:rgba(26,21,37,0.98);
+-    --text:#f1ecdf;
+-    --muted:rgba(241,236,223,0.72);
+-    --border:rgba(241,236,223,0.2);
+-    --accent:#ffcf8a;
+-    --accent-2:#8dd6ff;
+-  }
+-  html,body{margin:0;min-height:100%;background:
+-    radial-gradient(circle at top, rgba(83,60,124,0.2), transparent 34%),
+-    radial-gradient(circle at 20% 20%, rgba(141,214,255,0.12), transparent 22%),
+-    linear-gradient(180deg, #100d16 0%, var(--bg) 100%);
+-    color:var(--text);font-family:Georgia, 'Times New Roman', serif;
+-  }
+-  body{display:grid;place-items:center;padding:24px;box-sizing:border-box;}
+-  main{
+-    width:min(920px,100%);
+-    border:1px solid var(--border);
+-    background:linear-gradient(180deg, rgba(28,22,39,0.92), rgba(14,11,20,0.94));
+-    box-shadow:0 24px 80px rgba(0,0,0,0.45);
+-    overflow:hidden;
+-  }
+-  .hero{
+-    padding:40px clamp(20px, 4vw, 48px) 28px;
+-    display:grid;
+-    grid-template-columns:minmax(0,1.2fr) minmax(260px,0.8fr);
+-    gap:28px;
+-    align-items:end;
+-  }
+-  .eyebrow{
+-    margin:0 0 14px;
+-    font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+-    font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--accent-2);
+-  }
+-  h1{
+-    margin:0;
+-    font-size:clamp(52px, 10vw, 96px);
+-    line-height:.9;
+-    letter-spacing:-.05em;
+-  }
+-  .lede{
+-    margin:18px 0 0;
+-    max-width:60ch;
+-    font-size:18px;
+-    line-height:1.6;
+-    color:var(--muted);
+-  }
+-  .card{
+-    background:var(--panel);
+-    border:1px solid var(--border);
+-    padding:22px;
+-  }
+-  .card h2{
+-    margin:0 0 10px;
+-    font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+-    font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);
+-  }
+-  .card p{margin:0;color:var(--muted);line-height:1.6;font-size:14px;}
+-  .actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px;}
+-  .button{
+-    appearance:none;border:1px solid rgba(255,207,138,0.35);background:rgba(255,207,138,0.1);
+-    color:var(--text);text-decoration:none;padding:14px 18px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+-    font-size:12px;letter-spacing:.12em;text-transform:uppercase;transition:transform .15s ease, background .15s ease, border-color .15s ease;
+-  }
+-  .button.primary{background:linear-gradient(180deg, rgba(255,207,138,0.24), rgba(255,207,138,0.14));color:#fff4e1;}
+-  .button:hover{transform:translateY(-1px);border-color:rgba(255,207,138,0.7);background:rgba(255,207,138,0.18);}
+-  .stages{
+-    display:grid;
+-    grid-template-columns:repeat(5, minmax(0,1fr));
+-    gap:1px;
+-    background:var(--border);
+-    border-top:1px solid var(--border);
+-  }
+-  .stage{
+-    background:var(--panel-strong);
+-    padding:18px;
+-    min-height:132px;
+-  }
+-  .stage b{display:block;font-size:15px;margin-bottom:8px;}
+-  .stage span{display:block;font-size:13px;line-height:1.55;color:var(--muted);}
+-  .stage a{display:inline-block;margin-top:14px;color:var(--accent-2);text-decoration:none;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase;}
+-  .stage a:hover{text-decoration:underline;}
+-  .footer{
+-    padding:18px clamp(20px, 4vw, 48px) 28px;
+-    color:rgba(241,236,223,0.52);
+-    font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+-    font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+-  }
+-  @media (max-width: 840px){
+-    .hero{grid-template-columns:1fr;}
+-    .stages{grid-template-columns:1fr 1fr;}
+-  }
+-  @media (max-width: 540px){
+-    .stages{grid-template-columns:1fr;}
+-    .lede{font-size:16px;}
+-  }
++  html,body{
++    margin:0; padding:0; height:100%; width:100%; overflow:hidden;
++    background:#0c0a12; color:#f1ecdf;
++    font-family:'IBM Plex Mono', monospace;
++  }
++  #app{ position:fixed; inset:0; overflow:hidden; }
++  #legacy-link{
++    position:fixed; left:12px; bottom:12px; z-index:80;
++    font-size:11px; letter-spacing:0.06em; text-transform:uppercase;
++    color:rgba(241,236,223,0.55); text-decoration:none;
++  }
++  #legacy-link:hover{ color:#f1ecdf; }
+ </style>
+ </head>
+ <body>
+-</main>
+-<div id="app" style="position:fixed;inset:0;overflow:hidden;"></div>
+-<div style="position:fixed;left:12px;bottom:12px;z-index:80"><a href="/legacy-landing.html">Legacy landing & stages</a></div>
++<div id="app"></div>
++<a id="legacy-link" href="/legacy-landing.html">Legacy landing &amp; stages</a>
+ <script type="module" src="/src/main.js"></script>
+ </body>
+-</html>
+\ No newline at end of file
++</html>
+diff --git a/legacy-prototype/stages/stage1-boot.html b/legacy-prototype/stages/stage1-boot.html
+deleted file mode 100644
+index 4cde787..0000000
+--- a/legacy-prototype/stages/stage1-boot.html
++++ /dev/null
+@@ -1,421 +0,0 @@
+-<!DOCTYPE html>
+-<html lang="en">
+-<head>
+-<meta charset="UTF-8">
+-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+-<title>Hogarth — Boot Sequence (Stage 1, v2)</title>
+-<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+-<style>
+-  html,body{margin:0; padding:0; background:#141018; overflow:hidden; height:100%; width:100%;}
+-  #stage{position:fixed; inset:0;}
+-  #stage canvas{
+-    display:block; width:100%; height:100%;
+-    image-rendering:pixelated; image-rendering:-moz-crisp-edges; image-rendering:crisp-edges;
+-  }
+-
+-  .wipe{
+-    position:fixed; inset:0; pointer-events:none;
+-    width:100%; height:100%;
+-    image-rendering:pixelated; image-rendering:-moz-crisp-edges; image-rendering:crisp-edges;
+-  }
+-  #redWipe{ z-index:10; }
+-  #blackWipe{ z-index:11; }
+-
+-  #skip{
+-    position:fixed; bottom:28px; right:28px; z-index:50;
+-    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.1em; text-transform:uppercase;
+-    color:rgba(255,255,255,0.5); background:none; border:1px solid rgba(255,255,255,0.25);
+-    padding:8px 14px; cursor:pointer;
+-  }
+-  #skip:hover, #skip:focus-visible{ color:#fff; border-color:rgba(255,255,255,0.6); outline:none; }
+-
+-  #wordmarkCanvas{
+-    position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+-    width:min(72vw, 640px); height:auto;
+-    image-rendering:pixelated; image-rendering:-moz-crisp-edges; image-rendering:crisp-edges;
+-    opacity:0; transition:opacity 1.4s ease; z-index:20; pointer-events:none;
+-  }
+-  #enterHint{
+-    position:fixed; bottom:14%; left:50%; transform:translate(-50%,0);
+-    font-family:'IBM Plex Mono', monospace; font-size:11px;
+-    letter-spacing:0.14em; text-transform:uppercase; color:rgba(240,236,226,0.55);
+-    opacity:0; transition:opacity 1s ease; z-index:20; pointer-events:none;
+-  }
+-
+-  @media (prefers-reduced-motion: reduce){
+-    #stage{display:none;}
+-    #blackWipe{ background:#0a0810; opacity:1 !important; }
+-  }
+-</style>
+-</head>
+-<body>
+-
+-<div id="stage"></div>
+-<canvas id="redWipe" class="wipe" width="64" height="36"></canvas>
+-<canvas id="blackWipe" class="wipe" width="64" height="36"></canvas>
+-<canvas id="wordmarkCanvas" width="220" height="40"></canvas>
+-<div id="enterHint">click anywhere to continue</div>
+-<button id="skip" type="button">Skip →</button>
+-
+-<script>
+-(function(){
+-  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+-  const stageEl = document.getElementById('stage');
+-  const redWipeCanvas = document.getElementById('redWipe');
+-  const blackWipeCanvas = document.getElementById('blackWipe');
+-  const wordmarkCanvas = document.getElementById('wordmarkCanvas');
+-  const enterHint = document.getElementById('enterHint');
+-  const skipBtn = document.getElementById('skip');
+-
+-  // ---------- pixel wordmark, drawn once ----------
+-  (function drawWordmark(){
+-    const ctx = wordmarkCanvas.getContext('2d');
+-    ctx.clearRect(0,0,wordmarkCanvas.width,wordmarkCanvas.height);
+-    ctx.fillStyle = '#f0ece2';
+-    ctx.textAlign = 'center';
+-    ctx.textBaseline = 'middle';
+-    ctx.font = `20px "Press Start 2P", monospace`;
+-    ctx.fillText('HOGARTH', wordmarkCanvas.width/2, wordmarkCanvas.height/2 + 2);
+-  })();
+-  // Fonts can load async; redraw once the pixel font is confirmed ready.
+-  if (document.fonts && document.fonts.ready){
+-    document.fonts.load('20px "Press Start 2P"').then(() => {
+-      const ctx = wordmarkCanvas.getContext('2d');
+-      ctx.clearRect(0,0,wordmarkCanvas.width,wordmarkCanvas.height);
+-      ctx.fillStyle = '#f0ece2';
+-      ctx.textAlign = 'center';
+-      ctx.textBaseline = 'middle';
+-      ctx.font = `20px "Press Start 2P", monospace`;
+-      ctx.fillText('HOGARTH', wordmarkCanvas.width/2, wordmarkCanvas.height/2 + 2);
+-    }).catch(()=>{});
+-  }
+-
+-  // ---------- pixel dissolve wipes ----------
+-  function hexToRGB(hex){
+-    return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
+-  }
+-  function makeThresholds(cols, rows){
+-    const arr = new Float32Array(cols*rows);
+-    for (let i=0;i<arr.length;i++) arr[i] = Math.random();
+-    return arr;
+-  }
+-  const WIPE_COLS = 64, WIPE_ROWS = 36;
+-  const redThresh = makeThresholds(WIPE_COLS, WIPE_ROWS);
+-  const blackThresh = makeThresholds(WIPE_COLS, WIPE_ROWS);
+-
+-  function paintWipe(canvas, thresholds, colorRGB, coverage){
+-    const ctx = canvas.getContext('2d');
+-    const img = ctx.createImageData(canvas.width, canvas.height);
+-    for (let i=0;i<thresholds.length;i++){
+-      const idx = i*4;
+-      if (thresholds[i] <= coverage){
+-        img.data[idx]=colorRGB[0]; img.data[idx+1]=colorRGB[1]; img.data[idx+2]=colorRGB[2]; img.data[idx+3]=255;
+-      } else {
+-        img.data[idx+3]=0;
+-      }
+-    }
+-    ctx.putImageData(img,0,0);
+-  }
+-
+-  function animateWipe(canvas, thresholds, colorRGB, durationMs, onDone){
+-    const start = performance.now();
+-    function step(now){
+-      const t = Math.min((now-start)/durationMs, 1);
+-      paintWipe(canvas, thresholds, colorRGB, t);
+-      if (t < 1) requestAnimationFrame(step);
+-      else if (onDone) onDone();
+-    }
+-    requestAnimationFrame(step);
+-  }
+-
+-  const RED_RGB = hexToRGB('#a01414');
+-  const BLACK_RGB = hexToRGB('#0a0810');
+-
+-  let finished = false;
+-  function finish(){
+-    if (finished) return;
+-    finished = true;
+-    paintWipe(redWipeCanvas, redThresh, RED_RGB, 0);
+-    paintWipe(blackWipeCanvas, blackThresh, BLACK_RGB, 1);
+-    wordmarkCanvas.style.opacity = '0.95';
+-    enterHint.style.opacity = '1';
+-    skipBtn.style.display = 'none';
+-  }
+-  skipBtn.addEventListener('click', finish);
+-  if (reduceMotion){ finish(); return; }
+-
+-  // ---------- low-res 3D pixel render pipeline ----------
+-  const PIXEL_SCALE = 1/7;
+-  const scene = new THREE.Scene();
+-  scene.background = new THREE.Color(0x171220);
+-  const camera = new THREE.PerspectiveCamera(46, window.innerWidth/window.innerHeight, 0.1, 100);
+-  const camBase = new THREE.Vector3(0,0,9);
+-  camera.position.copy(camBase);
+-
+-  const renderer = new THREE.WebGLRenderer({ antialias:false });
+-  renderer.setPixelRatio(1);
+-  stageEl.appendChild(renderer.domElement);
+-
+-  function resize(){
+-    const w = Math.max(64, Math.floor(window.innerWidth * PIXEL_SCALE));
+-    const h = Math.max(48, Math.floor(window.innerHeight * PIXEL_SCALE));
+-    renderer.setSize(w, h, false);
+-    camera.aspect = window.innerWidth / window.innerHeight;
+-    camera.updateProjectionMatrix();
+-  }
+-  resize();
+-  window.addEventListener('resize', resize);
+-
+-  scene.add(new THREE.AmbientLight(0x2a2436, 1.1));
+-  const key = new THREE.PointLight(0xfff2d8, 1.6, 40); key.position.set(5,3,7); scene.add(key);
+-  const rim = new THREE.PointLight(0x6a4fd9, 0.6, 40); rim.position.set(-6,-2,-3); scene.add(rim);
+-
+-  // ---------- procedural planet textures (also keep raw canvases for color sampling) ----------
+-  function makePlanetTexture(kind){
+-    const size = 40;
+-    const canvas = document.createElement('canvas');
+-    canvas.width = size; canvas.height = size;
+-    const ctx = canvas.getContext('2d');
+-    const img = ctx.createImageData(size, size);
+-    const cx = size/2, cy = size/2, r = size/2 - 1;
+-    const palettes = {
+-      rock: ['#6b6373', '#847c8f', '#4d4757', '#a89fb0', '#38333f'],
+-      lava: ['#2a1210', '#4a1a12', '#7a2814', '#c94a1a', '#f2812e']
+-    };
+-    const pal = palettes[kind];
+-    for (let y=0;y<size;y++){
+-      for (let x=0;x<size;x++){
+-        const dx=x-cx, dy=y-cy, dist=Math.sqrt(dx*dx+dy*dy);
+-        const i=(y*size+x)*4;
+-        if (dist > r){ img.data[i+3]=0; continue; }
+-        const lightAmt = Math.max(0, (-dx-dy)/size);
+-        let colorIdx;
+-        if (kind==='rock'){
+-          const n = Math.sin(x*0.9)*Math.cos(y*0.7)+Math.sin((x+y)*0.35);
+-          colorIdx = Math.min(pal.length-1, Math.max(0, Math.round(2 - lightAmp*3 + n*0.6)));
+-        } else {
+-          const n = Math.sin(x*0.5+y*0.9)+Math.sin(x*1.3-y*0.4);
+-          colorIdx = Math.min(pal.length-1, Math.max(0, Math.round(1.5 + n*1.4 + lightAmp*1.2)));
+-        }
+-        const hex = pal[colorIdx];
+-        img.data[i]=parseInt(hex.slice(1,3),16);
+-        img.data[i+1]=parseInt(hex.slice(3,5),16);
+-        img.data[i+2]=parseInt(hex.slice(5,7),16);
+-        img.data[i+3]=255;
+-      }
+-    }
+-    ctx.putImageData(img,0,0);
+-    const tex = new THREE.CanvasTexture(canvas);
+-    tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter; tex.needsUpdate = true;
+-    return { texture: tex, canvas, size };
+-  }
+-
+-  function sampleOpaqueColors(sourceCanvas, size, count){
+-    const ctx = sourceCanvas.getContext('2d');
+-    const data = ctx.getImageData(0,0,size,size).data;
+-    const colors = [];
+-    let attempts = 0;
+-    while (colors.length < count && attempts < count*20){
+-      attempts++;
+-      const x = Math.floor(Math.random()*size), y = Math.floor(Math.random()*size);
+-      const i = (y*size+x)*4;
+-      if (data[i+3] > 200){
+-        colors.push(`#${data[i].toString(16).padStart(2,'0')}${data[i+1].toString(16).padStart(2,'0')}${data[i+2].toString(16).padStart(2,'0')}`);
+-      }
+-    }
+-    return colors.length ? colors : ['#c94a1a'];
+-  }
+-
+-  function makeFlashTexture(){
+-    const size = 24;
+-    const canvas = document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx = canvas.getContext('2d');
+-    const img = ctx.createImageData(size,size);
+-    const cx=size/2, cy=size/2, r=size/2-1;
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const dist=Math.hypot(x-cx,y-cy); const i=(y*size+x)*4;
+-      if (dist>r){ img.data[i+3]=0; continue; }
+-      const ring = dist/r;
+-      const hex = ring<0.55 ? '#fff6dd' : (ring<0.8 ? '#ffcf6b' : '#f2812e');
+-      img.data[i]=parseInt(hex.slice(1,3),16); img.data[i+1]=parseInt(hex.slice(3,5),16); img.data[i+2]=parseInt(hex.slice(5,7),16); img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0);
+-    const tex = new THREE.CanvasTexture(canvas);
+-    tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter;
+-    return tex;
+-  }
+-
+-  function makeParticleTexture(hex){
+-    const size = 6;
+-    const canvas = document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx = canvas.getContext('2d');
+-    ctx.fillStyle = hex; ctx.fillRect(0,0,size,size);
+-    const tex = new THREE.CanvasTexture(canvas);
+-    tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter;
+-    return tex;
+-  }
+-
+-  // stars
+-  const starGeo = new THREE.BufferGeometry();
+-  const starCount = 140;
+-  const starPos = new Float32Array(starCount*3);
+-  for (let i=0;i<starCount;i++){
+-    starPos[i*3]=(Math.random()-0.5)*40; starPos[i*3+1]=(Math.random()-0.5)*24; starPos[i*3+2]=-10-Math.random()*15;
+-  }
+-  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos,3));
+-  const starMat = new THREE.PointsMaterial({ size:0.12, map:makeParticleTexture('#e8e2f0'), transparent:true, depthWrite:false, sizeAttenuation:true });
+-  scene.add(new THREE.Points(starGeo, starMat));
+-
+-  const rockData = makePlanetTexture('rock');
+-  const lavaData = makePlanetTexture('lava');
+-  const rockDebrisColors = sampleOpaqueColors(rockData.canvas, rockData.size, 6);
+-  const lavaDebrisColors = sampleOpaqueColors(lavaData.canvas, lavaData.size, 6);
+-
+-  const RADIUS_A = 1.6, RADIUS_B = 1.15;
+-  const bodyA = new THREE.Sprite(new THREE.SpriteMaterial({ map: rockData.texture, transparent:true }));
+-  bodyA.scale.set(RADIUS_A*2, RADIUS_A*2, 1);
+-  const startA = new THREE.Vector3(-6, -1.2, 0);
+-  bodyA.position.copy(startA);
+-  scene.add(bodyA);
+-
+-  const bodyB = new THREE.Sprite(new THREE.SpriteMaterial({ map: lavaData.texture, transparent:true }));
+-  bodyB.scale.set(RADIUS_B*2, RADIUS_B*2, 1);
+-  const startB = new THREE.Vector3(6, 1.5, -1);
+-  bodyB.position.copy(startB);
+-  scene.add(bodyB);
+-
+-  // Contact geometry: bodies stop when their edges actually touch,
+-  // not when their centers coincide — this is what reads as a crash
+-  // rather than one absorbing the other.
+-  const impactCenter = new THREE.Vector3(0, 0.1, -0.4);
+-  const dir = new THREE.Vector3().subVectors(startB, startA).normalize();
+-  const finalA = impactCenter.clone().addScaledVector(dir, -RADIUS_A);
+-  const finalB = impactCenter.clone().addScaledVector(dir, RADIUS_B);
+-
+-  const flash = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeFlashTexture(), transparent:true, opacity:0 }));
+-  flash.scale.set(0.6,0.6,1);
+-  flash.position.copy(impactCenter);
+-  scene.add(flash);
+-
+-  // debris built from sampled planet colors
+-  const PARTICLE_COUNT = 80;
+-  const debrisSprites = [];
+-  const debrisVel = [];
+-  for (let i=0;i<PARTICLE_COUNT;i++){
+-    const fromRock = i % 2 === 0;
+-    const palette = fromRock ? rockDebrisColors : lavaDebrisColors;
+-    const hex = palette[Math.floor(Math.random()*palette.length)];
+-    const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeParticleTexture(hex), transparent:true, opacity:0 }));
+-    spr.scale.set(0.2 + Math.random()*0.14, 0.2 + Math.random()*0.14, 1);
+-    spr.position.copy(impactCenter);
+-    scene.add(spr);
+-    debrisSprites.push(spr);
+-    const theta = Math.random()*Math.PI*2;
+-    const speed = 2.2 + Math.random()*5.2;
+-    debrisVel.push(new THREE.Vector3(Math.cos(theta)*speed, Math.sin(theta)*speed, (Math.random()-0.5)*2.2));
+-  }
+-
+-  // small contact sparks that fire right at the moment of touch, before the full explosion
+-  const SPARK_COUNT = 14;
+-  const sparkSprites = [];
+-  const sparkVel = [];
+-  for (let i=0;i<SPARK_COUNT;i++){
+-    const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeParticleTexture('#fff6dd'), transparent:true, opacity:0 }));
+-    spr.scale.set(0.14,0.14,1);
+-    spr.position.copy(impactCenter);
+-    scene.add(spr);
+-    sparkSprites.push(spr);
+-    const theta = Math.random()*Math.PI*2;
+-    sparkVel.push(new THREE.Vector3(Math.cos(theta)*1.8, Math.sin(theta)*1.8, (Math.random()-0.5)*1.2));
+-  }
+-
+-  let phase = 'approach';
+-  let phaseStart = performance.now();
+-  const APPROACH_MS = 2100;
+-  const IMPACT_MS = 170;
+-  const EXPLODE_MS = 950;
+-  function easeInOutCubic(t){ return t<0.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2; }
+-  function easeOutQuad(t){ return 1 - (1-t)*(1-t); }
+-
+-  function animate(now){
+-    if (finished) return;
+-    requestAnimationFrame(animate);
+-    const elapsed = now - phaseStart;
+-
+-    if (phase === 'approach'){
+-      const t = Math.min(elapsed/APPROACH_MS, 1);
+-      const e = easeInOutCubic(t);
+-      bodyA.position.lerpVectors(startA, finalA, e);
+-      bodyB.position.lerpVectors(startB, finalB, e);
+-      camera.position.set(camBase.x, camBase.y, camBase.z - e*1.2);
+-      if (t >= 1){
+-        phase = 'impact'; phaseStart = now;
+-        sparkSprites.forEach(s => s.material.opacity = 1);
+-      }
+-    } else if (phase === 'impact'){
+-      const t = Math.min(elapsed/IMPACT_MS, 1);
+-      // squash both bodies along the contact axis, bulge perpendicular
+-      const squash = 1 - 0.35*Math.sin(t*Math.PI);
+-      const bulge = 1 + 0.25*Math.sin(t*Math.PI);
+-      bodyA.scale.set(RADIUS_A*2*bulge, RADIUS_A*2*squash, 1);
+-      bodyB.scale.set(RADIUS_B*2*bulge, RADIUS_B*2*squash, 1);
+-      // camera shake
+-      const shake = (1-t) * 0.09;
+-      camera.position.x = camBase.x + (Math.random()-0.5)*shake;
+-      camera.position.y = camBase.y + (Math.random()-0.5)*shake;
+-      // sparks jitter outward slightly at the seam
+-      const dt = elapsed/1000;
+-      for (let i=0;i<SPARK_COUNT;i++){
+-        sparkSprites[i].position.set(
+-          impactCenter.x + sparkVel[i].x*dt,
+-          impactCenter.y + sparkVel[i].y*dt,
+-          impactCenter.z + sparkVel[i].z*dt
+-        );
+-        sparkSprites[i].material.opacity = Math.max(0, 1-t);
+-      }
+-      if (t >= 1){
+-        phase = 'explode'; phaseStart = now;
+-        bodyA.visible = false; bodyB.visible = false;
+-        flash.material.opacity = 1;
+-        debrisSprites.forEach(s => s.material.opacity = 1);
+-        sparkSprites.forEach(s => s.material.opacity = 0);
+-      }
+-    } else if (phase === 'explode'){
+-      const t = Math.min(elapsed/EXPLODE_MS, 1);
+-      const dt = elapsed/1000;
+-      for (let i=0;i<PARTICLE_COUNT;i++){
+-        debrisSprites[i].position.set(
+-          impactCenter.x + debrisVel[i].x*dt,
+-          impactCenter.y + debrisVel[i].y*dt,
+-          impactCenter.z + debrisVel[i].z*dt
+-        );
+-        debrisSprites[i].material.opacity = Math.max(0, 1-t);
+-      }
+-      flash.material.opacity = Math.max(0, 1 - t*1.5);
+-      flash.scale.setScalar(3.4 + t*4);
+-
+-      if (t > 0.3 && !redWipeCanvas.dataset.started){
+-        redWipeCanvas.dataset.started = '1';
+-        animateWipe(redWipeCanvas, redThresh, RED_RGB, 520, () => {
+-          setTimeout(() => {
+-            animateWipe(blackWipeCanvas, blackThresh, BLACK_RGB, 520, finish);
+-          }, 220);
+-        });
+-      }
+-      if (t >= 1){ phase = 'done'; }
+-    }
+-
+-    renderer.render(scene, camera);
+-  }
+-  requestAnimationFrame(animate);
+-
+-  document.addEventListener('click', (e) => {
+-    if (e.target === skipBtn) return;
+-    finish();
+-  });
+-})();
+-</script>
+-
+-</body>
+-</html>
+diff --git a/legacy-prototype/stages/stage5-enter-reader.html b/legacy-prototype/stages/stage5-enter-reader.html
+deleted file mode 100644
+index cdf47ea..0000000
+--- a/legacy-prototype/stages/stage5-enter-reader.html
++++ /dev/null
+@@ -1,856 +0,0 @@
+-<!DOCTYPE html>
+-<html lang="en">
+-<head>
+-<meta charset="UTF-8">
+-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+-<title>Hogarth — Town Map (Stage 5, Enter Building)</title>
+-<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+-<style>
+-  html,body{margin:0; padding:0; background:#0c0a12; overflow:hidden; height:100%; width:100%;}
+-  #stage{position:fixed; inset:0;}
+-  #stage canvas{
+-    display:block; width:100%; height:100%;
+-    image-rendering:pixelated; image-rendering:-moz-crisp-edges; image-rendering:crisp-edges;
+-  }
+-  #hud{
+-    position:fixed; top:20px; left:20px; z-index:20;
+-    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.08em;
+-    text-transform:uppercase; color:rgba(240,236,226,0.75);
+-    display:flex; flex-direction:column; gap:10px; max-width:280px;
+-  }
+-  #hud .title{color:#f0ece2;}
+-  #hud .dim{opacity:0.55;}
+-  #controls{ display:flex; flex-wrap:wrap; gap:8px; }
+-  #controls button, #controls label{
+-    font-family:'IBM Plex Mono', monospace; font-size:10px; letter-spacing:0.06em; text-transform:uppercase;
+-    background:rgba(20,16,28,0.7); color:#f0ece2; border:1px solid rgba(240,236,226,0.3);
+-    padding:8px 12px; cursor:pointer; display:inline-block;
+-  }
+-  #controls button:hover, #controls label:hover{ background:rgba(240,236,226,0.12); }
+-  #fileInput{ display:none; }
+-  #status{ font-size:10px; color:#ffcf8a; min-height:14px; opacity:0; transition:opacity 0.3s ease; }
+-  #tooltip{
+-    position:fixed; z-index:30; pointer-events:none;
+-    font-family:'IBM Plex Mono', monospace; font-size:11px;
+-    background:rgba(10,8,16,0.85); color:#f0ece2; border:1px solid rgba(240,236,226,0.25);
+-    padding:6px 10px; opacity:0; transition:opacity 0.15s ease; white-space:nowrap;
+-  }
+-
+-  /* ---------- reader panel ---------- */
+-  #scrim{
+-    position:fixed; inset:0; background:rgba(10,8,16,0.55);
+-    opacity:0; pointer-events:none; transition:opacity 0.5s ease; z-index:80;
+-  }
+-  #scrim.open{ opacity:1; pointer-events:auto; }
+-  #reader{
+-    position:fixed; top:50%; left:50%; z-index:90;
+-    width:min(560px, 90vw); max-height:82vh; overflow-y:auto;
+-    background:#171220; border:2px solid #f0ece2;
+-    transform:translate(-50%,-46%) scale(0.94); opacity:0; pointer-events:none;
+-    transition:transform 0.45s cubic-bezier(.2,.8,.2,1), opacity 0.4s ease;
+-    padding:0;
+-  }
+-  #reader.open{ transform:translate(-50%,-50%) scale(1); opacity:1; pointer-events:auto; }
+-  #reader .readerTop{
+-    display:flex; justify-content:space-between; align-items:center;
+-    padding:14px 18px; border-bottom:1px solid rgba(240,236,226,0.2);
+-  }
+-  #reader .kicker{ font-family:'IBM Plex Mono', monospace; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:rgba(240,236,226,0.55); }
+-  #reader .closeBtn{
+-    font-family:'IBM Plex Mono', monospace; font-size:10px; letter-spacing:0.06em; text-transform:uppercase;
+-    background:none; color:#f0ece2; border:1px solid rgba(240,236,226,0.3); padding:6px 10px; cursor:pointer;
+-  }
+-  #reader .closeBtn:hover{ background:rgba(240,236,226,0.12); }
+-  #reader .readerBody{ padding:22px 24px 30px; display:flex; gap:20px; align-items:flex-start; }
+-  #reader .cover{
+-    width:120px; height:120px; flex-shrink:0;
+-    image-rendering:pixelated; image-rendering:-moz-crisp-edges; image-rendering:crisp-edges;
+-    border:1px solid rgba(240,236,226,0.25);
+-  }
+-  #reader h2{
+-    font-family:'Press Start 2P', monospace; font-size:14px; color:#f0ece2; margin:0 0 14px; line-height:1.5;
+-  }
+-  #reader .mountNote{
+-    font-family:'IBM Plex Mono', monospace; font-size:12px; color:rgba(240,236,226,0.65); line-height:1.6;
+-    border:1px dashed rgba(240,236,226,0.3); padding:12px 14px;
+-  }
+-  #reader .statusLine{
+-    font-family:'IBM Plex Mono', monospace; font-size:11px; color:rgba(240,236,226,0.55); line-height:1.6;
+-  }
+-
+-  /* ---------- page viewer ---------- */
+-  #pageView{ display:none; border-top:1px solid rgba(240,236,226,0.2); padding:18px 24px 24px; }
+-  #pageView.active{ display:block; }
+-  .pageStage{
+-    position:relative; width:100%; max-height:56vh; overflow:auto;
+-    display:flex; align-items:flex-start; justify-content:center;
+-    background:#0c0a12; border:1px solid rgba(240,236,226,0.15);
+-  }
+-  .pageStage img{ display:block; max-width:100%; height:auto; opacity:0; transition:opacity 0.2s ease; }
+-  .pageStage img.loaded{ opacity:1; }
+-  .pageSpinner{
+-    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+-    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.08em; text-transform:uppercase;
+-    color:rgba(240,236,226,0.55); opacity:0; pointer-events:none; transition:opacity 0.15s ease;
+-  }
+-  .pageSpinner.active{ opacity:1; }
+-  .pageNav{
+-    display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:12px;
+-    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.06em; text-transform:uppercase;
+-  }
+-  .pageNav button{
+-    background:rgba(20,16,28,0.7); color:#f0ece2; border:1px solid rgba(240,236,226,0.3);
+-    padding:8px 14px; cursor:pointer; font:inherit; letter-spacing:inherit; text-transform:inherit;
+-  }
+-  .pageNav button:hover:not(:disabled){ background:rgba(240,236,226,0.12); }
+-  .pageNav button:disabled{ opacity:0.3; cursor:default; }
+-  .pageCounter{ color:rgba(240,236,226,0.65); }
+-
+-  @media (max-width:520px){
+-    #reader .readerBody{ flex-direction:column; align-items:center; text-align:center; }
+-  }
+-</style>
+-</head>
+-<body>
+-
+-<div id="stage"></div>
+-<div id="hud">
+-  <div><span class="title">HOGARTH</span> <span class="dim" id="hudCount">/ town — 0 plots, 0 lit</span></div>
+-  <div id="controls">
+-    <label for="fileInput" id="uploadLabel">Upload comic(s)</label>
+-    <input id="fileInput" type="file" accept=".cbz,.cbr,.zip,.rar,application/zip,application/vnd.rar,application/x-rar-compressed" multiple>
+-    <button id="addMock" type="button">+ Add mock (no cover)</button>
+-  </div>
+-  <div id="status"></div>
+-</div>
+-<div id="tooltip"></div>
+-
+-<div id="scrim"></div>
+-<div id="reader" role="dialog" aria-modal="true" aria-labelledby="readerTitle">
+-  <div class="readerTop">
+-    <span class="kicker">Now entering</span>
+-    <button class="closeBtn" id="readerClose" type="button">✕ Close</button>
+-  </div>
+-  <div class="readerBody" id="readerBody">
+-    <canvas class="cover" id="readerCover" width="20" height="20"></canvas>
+-    <div style="flex:1; min-width:0;">
+-      <h2 id="readerTitle">—</h2>
+-      <div class="mountNote" id="readerFallback">Reader UI mounts here. This is the handoff point to Hogarth's actual comic reader — page decode pipeline and LRU cache take over from this screen.</div>
+-    </div>
+-  </div>
+-  <div class="pageView" id="pageView">
+-    <div class="pageStage">
+-      <img id="pageImg" alt="Comic page">
+-      <div class="pageSpinner" id="pageSpinner">Decoding…</div>
+-    </div>
+-    <div class="pageNav">
+-      <button id="pagePrev" type="button">‹ Prev</button>
+-      <span class="pageCounter" id="pageCounter">1 / 1</span>
+-      <button id="pageNext" type="button">Next ›</button>
+-    </div>
+-  </div>
+-</div>
+-
+-<script>
+-(function(){
+-  const stageEl = document.getElementById('stage');
+-  const tooltip = document.getElementById('tooltip');
+-  const hudCount = document.getElementById('hudCount');
+-  const hud = document.getElementById('hud');
+-  const statusEl = document.getElementById('status');
+-  const scrim = document.getElementById('scrim');
+-  const reader = document.getElementById('reader');
+-  const readerCover = document.getElementById('readerCover');
+-  const readerTitle = document.getElementById('readerTitle');
+-  const readerClose = document.getElementById('readerClose');
+-  const readerFallback = document.getElementById('readerFallback');
+-  const pageView = document.getElementById('pageView');
+-  const pageImg = document.getElementById('pageImg');
+-  const pageSpinner = document.getElementById('pageSpinner');
+-  const pagePrev = document.getElementById('pagePrev');
+-  const pageNext = document.getElementById('pageNext');
+-  const pageCounter = document.getElementById('pageCounter');
+-  let readerPageIndex = 0;
+-  const fileInput = document.getElementById('fileInput');
+-  const uploadLabel = document.getElementById('uploadLabel');
+-  const addMockBtn = document.getElementById('addMock');
+-
+-  // ---------- comic decode pipeline (CBZ/CBR, fully in-browser) ----------
+-  // libarchive.js is a WASM port of libarchive — it reads ZIP, RAR (v4 & v5),
+-  // 7z, and TAR through one API, so CBZ and CBR share the same code path
+-  // here instead of needing separate zip/unrar libraries.
+-  const LIBARCHIVE_VERSION = '2.0.2';
+-  let libarchivePromise = null;
+-  function loadArchiveLib(){
+-    if (!libarchivePromise){
+-      libarchivePromise = import(`https://cdn.jsdelivr.net/npm/libarchive.js@${LIBARCHIVE_VERSION}/main.js`)
+-        .then(({ Archive }) => {
+-          Archive.init({
+-            workerUrl: `https://cdn.jsdelivr.net/npm/libarchive.js@${LIBARCHIVE_VERSION}/dist/worker-bundle.js`
+-          });
+-          return Archive;
+-        });
+-    }
+-    return libarchivePromise;
+-  }
+-
+-  const IMAGE_EXT_RE = /\.(jpe?g|png|webp|gif|bmp)$/i;
+-  const COMIC_EXT_RE = /\.(cbz|cbr|zip|rar)$/i;
+-
+-  function naturalCompare(a, b){
+-    const tok = s => { const out = []; String(s).replace(/(\d+)|(\D+)/g, (_, d, t) => { out.push(d !== undefined ? [0, parseInt(d, 10)] : [1, t]); }); return out; };
+-    const ax = tok(a), bx = tok(b);
+-    const len = Math.min(ax.length, bx.length);
+-    for (let i = 0; i < len; i++){
+-      const [ak, av] = ax[i], [bk, bv] = bx[i];
+-      if (ak !== bk) return ak - bk;
+-      if (av !== bv) return typeof av === 'number' ? av - bv : (av < bv ? -1 : av > bv ? 1 : 0);
+-    }
+-    return ax.length - bx.length;
+-  }
+-
+-  // extractFiles() returns a nested directory tree of {name: File | {name: File...}} —
+-  // flatten it to a single list of {name, file} regardless of folder depth.
+-  function flattenFileTree(node, prefix = ''){
+-    const out = [];
+-    for (const [name, val] of Object.entries(node)){
+-      if (val instanceof File){
+-        out.push({ name: prefix + name, file: val });
+-      } else if (val && typeof val === 'object'){
+-        out.push(...flattenFileTree(val, prefix + name + '/'));
+-      }
+-    }
+-    return out;
+-  }
+-
+-  // Lazy decode + LRU cache: pages are kept as raw File/Blob handles from the
+-  // archive (cheap) and only turned into an object URL — the actual decode
+-  // into something the <img> can paint — the moment they're viewed. Only the
+-  // `limit` most-recently-viewed pages keep a live object URL; anything older
+-  // gets revoked so a long book doesn't pin every page in memory at once.
+-  class PageCache {
+-    constructor(limit = 10){ this.limit = limit; this.map = new Map(); }
+-    urlFor(index, file){
+-      if (this.map.has(index)){
+-        const url = this.map.get(index);
+-        this.map.delete(index); this.map.set(index, url); // bump recency
+-        return url;
+-      }
+-      const url = URL.createObjectURL(file);
+-      this.map.set(index, url);
+-      if (this.map.size > this.limit){
+-        const oldestKey = this.map.keys().next().value;
+-        URL.revokeObjectURL(this.map.get(oldestKey));
+-        this.map.delete(oldestKey);
+-      }
+-      return url;
+-    }
+-    warm(index, file){ if (!this.map.has(index)) this.urlFor(index, file); }
+-  }
+-
+-  async function decodeComicArchive(file){
+-    const Archive = await loadArchiveLib();
+-    const archive = await Archive.open(file);
+-    const tree = await archive.extractFiles();
+-    const entries = flattenFileTree(tree)
+-      .filter(e => IMAGE_EXT_RE.test(e.name) && !/(^|\/)__macosx\//i.test(e.name))
+-      .sort((a, b) => naturalCompare(a.name, b.name));
+-    if (entries.length === 0) throw new Error('No image pages found in archive');
+-    return { pages: entries, cache: new PageCache() };
+-  }
+-
+-  function showStatus(msg){
+-    statusEl.textContent = msg;
+-    statusEl.style.opacity = '1';
+-    clearTimeout(showStatus._t);
+-    showStatus._t = setTimeout(() => { statusEl.style.opacity = '0'; }, 1800);
+-  }
+-
+-  // ---------- color helpers ----------
+-  function hexToInts(hex){ return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]; }
+-  function rgbToHex(r,g,b){ const h=v=>Math.max(0,Math.min(255,Math.round(v))).toString(16).padStart(2,'0'); return `#${h(r)}${h(g)}${h(b)}`; }
+-  function rgbToHsl(r,g,b){
+-    r/=255; g/=255; b/=255;
+-    const max=Math.max(r,g,b), min=Math.min(r,g,b);
+-    let h,s,l=(max+min)/2;
+-    if (max===min){ h=0; s=0; } else{
+-      const d=max-min; s = l>0.5 ? d/(2-max-min) : d/(max+min);
+-      switch(max){ case r: h=(g-b)/d+(g<b?6:0); break; case g: h=(b-r)/d+2; break; case b: h=(r-g)/d+4; break; }
+-      h*=60;
+-    }
+-    return [h,s,l];
+-  }
+-  function hslToHex(h,s,l){
+-    s/=100; l/=100;
+-    const k=n=>(n+h/30)%12, a=s*Math.min(l,1-l);
+-    const f=n=>l-a*Math.max(-1,Math.min(k(n)-3,Math.min(9-k(n),1)));
+-    const toHex=x=>Math.round(x*255).toString(16).padStart(2,'0');
+-    return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
+-  }
+-  function shade(hex, amt){ const [r,g,b]=hexToInts(hex); return rgbToHex(r+amt*255,g+amt*255,b+amt*255); }
+-  function hashHue(str){ let h=0; for (let i=0;i<str.length;i++) h=(h*31+str.charCodeAt(i))>>>0; return h%360; }
+-
+-  function extractDominantColor(canvas){
+-    const ctx = canvas.getContext('2d');
+-    const { width, height } = canvas;
+-    const data = ctx.getImageData(0,0,width,height).data;
+-    const buckets = {};
+-    for (let i=0;i<data.length;i+=4){
+-      if (data[i+3] < 128) continue;
+-      const [h,s,l] = rgbToHsl(data[i],data[i+1],data[i+2]);
+-      if (s < 0.15 || l < 0.08 || l > 0.92) continue;
+-      const bucket = Math.floor(h/15)*15;
+-      if (!buckets[bucket]) buckets[bucket] = { count:0, sSum:0, lSum:0 };
+-      buckets[bucket].count++; buckets[bucket].sSum+=s; buckets[bucket].lSum+=l;
+-    }
+-    let bestKey=null, bestCount=0;
+-    for (const k in buckets){ if (buckets[k].count>bestCount){ bestCount=buckets[k].count; bestKey=k; } }
+-    if (bestKey===null){
+-      let rS=0,gS=0,bS=0,n=0;
+-      for (let i=0;i<data.length;i+=4){ if (data[i+3]<128) continue; rS+=data[i]; gS+=data[i+1]; bS+=data[i+2]; n++; }
+-      n=n||1; return rgbToHex(rS/n,gS/n,bS/n);
+-    }
+-    const b = buckets[bestKey];
+-    const avgS=b.sSum/b.count, avgL=Math.min(0.62,Math.max(0.3,b.lSum/b.count));
+-    return hslToHex(Number(bestKey), avgS*100, avgL*100);
+-  }
+-
+-  function makeNearestTexture(canvas){
+-    const tex = new THREE.CanvasTexture(canvas);
+-    tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter;
+-    tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
+-    return tex;
+-  }
+-  function makeGroundTexture(){
+-    const size=16, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx=canvas.getContext('2d'); const img=ctx.createImageData(size,size);
+-    const base=['#3c5a3e','#456647','#345036','#4d6f4f'];
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const n=Math.sin(x*1.7)*Math.cos(y*1.3)+Math.sin((x+y)*0.9);
+-      const idx=Math.min(base.length-1,Math.max(0,Math.round((n+1.4)/0.9)));
+-      const [r,g,b]=hexToInts(base[idx]); const i=(y*size+x)*4;
+-      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0); return canvas;
+-  }
+-  function makeStreetTexture(){
+-    const size=16, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx=canvas.getContext('2d'); const img=ctx.createImageData(size,size);
+-    const base=['#5a5560','#65606c','#4d4954'];
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const n=Math.sin(x*2.1+y*0.4);
+-      const idx=Math.min(base.length-1,Math.max(0,Math.round((n+1)/0.9)));
+-      const [r,g,b]=hexToInts(base[idx]); const i=(y*size+x)*4;
+-      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0); return canvas;
+-  }
+-  function makeBuildingTexture(baseHex, accentHex){
+-    const size=16, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx=canvas.getContext('2d'); const img=ctx.createImageData(size,size);
+-    const [br,bg,bb]=hexToInts(baseHex); const [ar,ag,ab]=hexToInts(accentHex);
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const i=(y*size+x)*4;
+-      const isDoor = x>=6 && x<=9 && y>=9;
+-      const isWindow = (x===3||x===12) && y>=3 && y<=6;
+-      const brickLine = (y%4===0);
+-      let r=br,g=bg,b=bb;
+-      if (isDoor){ r=30; g=22; b=18; }
+-      else if (isWindow){ r=ar; g=ag; b=ab; }
+-      else if (brickLine){ r=Math.max(0,br-18); g=Math.max(0,bg-18); b=Math.max(0,bb-18); }
+-      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0); return canvas;
+-  }
+-  function makeStarTexture(){
+-    const size=6, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx=canvas.getContext('2d'); ctx.fillStyle='#e8e2f0'; ctx.fillRect(0,0,size,size);
+-    return canvas;
+-  }
+-  function makePlaceholderCoverCanvas(baseHex){
+-    const size=20, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx=canvas.getContext('2d'); const img=ctx.createImageData(size,size);
+-    const [br,bg,bb]=hexToInts(baseHex);
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const i=(y*size+x)*4;
+-      const n = Math.sin(x*0.8+y*0.5)+Math.sin((x-y)*0.6);
+-      const f = 0.75 + n*0.12;
+-      img.data[i]=Math.min(255,br*f); img.data[i+1]=Math.min(255,bg*f); img.data[i+2]=Math.min(255,bb*f); img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0); return canvas;
+-  }
+-
+-  // ---------- scene / camera / renderer ----------
+-  const PIXEL_SCALE = 1/6;
+-  const scene = new THREE.Scene();
+-  scene.background = new THREE.Color(0x14101c);
+-  scene.fog = new THREE.Fog(0x14101c, 24, 46);
+-
+-  const camera = new THREE.OrthographicCamera(-1,1,1,-1,0.1,200);
+-  const renderer = new THREE.WebGLRenderer({ antialias:false });
+-  renderer.setPixelRatio(1);
+-  stageEl.appendChild(renderer.domElement);
+-
+-  function resizeRenderer(){
+-    const w = Math.max(64, Math.floor(window.innerWidth * PIXEL_SCALE));
+-    const h = Math.max(48, Math.floor(window.innerHeight * PIXEL_SCALE));
+-    renderer.setSize(w, h, false);
+-  }
+-
+-  scene.add(new THREE.AmbientLight(0x2e2a3c, 1.2));
+-  const moon = new THREE.DirectionalLight(0xcfd0ff, 0.75); moon.position.set(-8,12,6); scene.add(moon);
+-  const warmFill = new THREE.PointLight(0x6a4fd9, 0.4, 30); warmFill.position.set(6,4,-6); scene.add(warmFill);
+-
+-  const groundMat = new THREE.MeshStandardMaterial({ map: makeNearestTexture(makeGroundTexture()), roughness:1 });
+-  const streetMat = new THREE.MeshStandardMaterial({ map: makeNearestTexture(makeStreetTexture()), roughness:1 });
+-
+-  let groundMesh=null, streetMesh=null;
+-  const zSpacing = 6, rowStartZ = -6;
+-
+-  function rebuildGroundAndStreet(rows){
+-    if (groundMesh){ scene.remove(groundMesh); groundMesh.geometry.dispose(); }
+-    if (streetMesh){ scene.remove(streetMesh); streetMesh.geometry.dispose(); }
+-    const minZ = rowStartZ - 5, maxZ = rowStartZ + (rows-1)*zSpacing + 5;
+-    const length = maxZ - minZ, centerZ = (minZ+maxZ)/2;
+-    groundMat.map.repeat.set(10, length/2.4);
+-    streetMat.map.repeat.set(2, length/1.83);
+-    groundMesh = new THREE.Mesh(new THREE.PlaneGeometry(24, length), groundMat);
+-    groundMesh.rotation.x = -Math.PI/2; groundMesh.position.z = centerZ; scene.add(groundMesh);
+-    streetMesh = new THREE.Mesh(new THREE.PlaneGeometry(3, length), streetMat);
+-    streetMesh.rotation.x = -Math.PI/2; streetMesh.position.y = 0.01; streetMesh.position.z = centerZ; scene.add(streetMesh);
+-  }
+-
+-  // ---------- camera framing + fly-in ----------
+-  // The camera always sits at (lookAt + dist*ISO_DIR) — dollying along a
+-  // fixed isometric direction while the frustum size (vs) and the look
+-  // target change is what makes "zoom to the whole town" and "fly in to
+-  // one plot" feel like the same camera, not two different modes.
+-  const ISO_DIR = { x:1, y:0.875, z:0.6 };
+-  let currentVs = 12, currentDist = 16, currentLookAt = new THREE.Vector3(0,0,0);
+-  let builtRows = 0;
+-  let focusedPlot = null;
+-  let camAnim = null;
+-
+-  function setCameraFrame(vs, dist, lookAt){
+-    const a = window.innerWidth/window.innerHeight;
+-    camera.left=-vs*a; camera.right=vs*a; camera.top=vs; camera.bottom=-vs;
+-    camera.position.set(lookAt.x+dist*ISO_DIR.x, lookAt.y+dist*ISO_DIR.y, lookAt.z+dist*ISO_DIR.z);
+-    camera.lookAt(lookAt);
+-    camera.updateProjectionMatrix();
+-    currentVs = vs; currentDist = dist; currentLookAt = lookAt.clone();
+-  }
+-
+-  function easeInOutCubic(t){ return t<0.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2; }
+-
+-  function animateCameraTo(vs, dist, lookAt, duration, onDone){
+-    camAnim = {
+-      startVs: currentVs, startDist: currentDist, startLookAt: currentLookAt.clone(),
+-      endVs: vs, endDist: dist, endLookAt: lookAt.clone(),
+-      start: performance.now(), duration, onDone
+-    };
+-  }
+-
+-  function updateCameraFit(){
+-    if (focusedPlot || camAnim) return; // don't fight an active focus/animation
+-    const rows = Math.max(1, builtRows);
+-    const midZ = rowStartZ + (rows-1)*(zSpacing/2);
+-    const vs = 11 + rows*2.0;
+-    const dist = 15 + rows*2.0;
+-    setCameraFrame(vs, dist, new THREE.Vector3(0,0,midZ));
+-  }
+-
+-  resizeRenderer();
+-  window.addEventListener('resize', () => { resizeRenderer(); updateCameraFit(); });
+-
+-  // ---------- plots ----------
+-  const plotGroup = new THREE.Group();
+-  scene.add(plotGroup);
+-  const plots = [];
+-
+-  function computeSlotPosition(n){
+-    const side = n%2===0 ? -1 : 1;
+-    const row = Math.floor(n/2);
+-    return { x: side*5.5, z: rowStartZ + row*zSpacing, side };
+-  }
+-
+-  function createPlot(index, title, baseHex, accentHex, coverCanvas){
+-    const { x, z, side } = computeSlotPosition(index);
+-    const g = new THREE.Group();
+-    g.position.set(x, 0, z);
+-
+-    const base = new THREE.Mesh(new THREE.BoxGeometry(2.6,0.15,2.6), new THREE.MeshStandardMaterial({ color:0x2a2634, roughness:1 }));
+-    base.position.y = 0.075; g.add(base);
+-
+-    const facadeTex = makeNearestTexture(makeBuildingTexture(baseHex, accentHex));
+-    const building = new THREE.Mesh(new THREE.BoxGeometry(1.6,1.6,1.6), new THREE.MeshStandardMaterial({ map: facadeTex, roughness:0.9 }));
+-    building.position.y = 0.15+0.8; g.add(building);
+-
+-    const roof = new THREE.Mesh(new THREE.ConeGeometry(1.3,0.9,4), new THREE.MeshStandardMaterial({ color:0x1c1822, roughness:1 }));
+-    roof.rotation.y = Math.PI/4; roof.position.y = 0.15+1.6+0.45; g.add(roof);
+-
+-    const signTex = makeNearestTexture(coverCanvas);
+-    const sign = new THREE.Mesh(new THREE.PlaneGeometry(0.9,0.9), new THREE.MeshStandardMaterial({ map: signTex, roughness:1, side: THREE.DoubleSide }));
+-    sign.position.set(0,1.0,1.35); g.add(sign);
+-    const signPost = new THREE.Mesh(new THREE.BoxGeometry(0.08,0.5,0.08), new THREE.MeshStandardMaterial({ color:0x1c1822 }));
+-    signPost.position.set(0,0.4,1.35); g.add(signPost);
+-
+-    const lampGroup = new THREE.Group();
+-    lampGroup.position.set(-side*1.7, 0, 0.9);
+-    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.05,0.06,1.8,6), new THREE.MeshStandardMaterial({ color:0x1c1822, roughness:0.8 }));
+-    pole.position.y = 0.9; lampGroup.add(pole);
+-    const bulbMat = new THREE.MeshStandardMaterial({ color:0x3a3640, emissive:0x000000, emissiveIntensity:0, roughness:0.5 });
+-    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.16,8,8), bulbMat);
+-    bulb.position.y = 1.85; lampGroup.add(bulb);
+-    const glowLight = new THREE.PointLight(0xffcf8a, 0, 4);
+-    glowLight.position.y = 1.85; lampGroup.add(glowLight);
+-    g.add(lampGroup);
+-
+-    plotGroup.add(g);
+-    return { group:g, building, roof, sign, bulbMat, glowLight, lit:false, index, label:title, coverCanvas, comic:null };
+-  }
+-
+-  function igniteLamp(plot, colorHex){
+-    const targetColor = parseInt(colorHex.replace('#','0x'));
+-    plot.bulbMat.emissive.setHex(targetColor);
+-    plot.glowLight.color.setHex(targetColor);
+-    const start = performance.now();
+-    function step(now){
+-      const t = Math.min((now-start)/500, 1);
+-      plot.bulbMat.emissiveIntensity = t;
+-      plot.glowLight.intensity = t*1.15;
+-      if (t<1) requestAnimationFrame(step);
+-      else { plot.lit = true; updateHud(); }
+-    }
+-    requestAnimationFrame(step);
+-  }
+-
+-  function placePlot(title, baseHex, accentHex, lampHex, coverCanvas, comic){
+-    const n = plots.length;
+-    const rowsNeeded = Math.floor(n/2)+1;
+-    if (rowsNeeded > builtRows){ builtRows = rowsNeeded; rebuildGroundAndStreet(builtRows); }
+-    const plot = createPlot(n, title, baseHex, accentHex, coverCanvas);
+-    if (comic) plot.comic = comic;
+-    plots.push(plot);
+-    updateCameraFit();
+-    updateHud();
+-    setTimeout(() => igniteLamp(plot, lampHex), 380);
+-  }
+-
+-  function updateHud(){
+-    const lit = plots.filter(p=>p.lit).length;
+-    hudCount.textContent = `/ town — ${plots.length} plot${plots.length===1?'':'s'}, ${lit} lit`;
+-  }
+-
+-  // ---------- upload + decode + analysis ----------
+-  // Downscales the first page of a decoded comic into the same 20x20 pixel
+-  // canvas the old cover-image flow used, so dominant-color extraction and
+-  // the pixel-art sign texture work unchanged — the comic's actual first
+-  // page stands in for the "cover image" the rest of the town logic expects.
+-  function makeThumbFromImage(img){
+-    const s = Math.min(img.width, img.height);
+-    const sx = (img.width-s)/2, sy = (img.height-s)/2;
+-    const thumb = document.createElement('canvas');
+-    thumb.width = 20; thumb.height = 20;
+-    const tctx = thumb.getContext('2d');
+-    tctx.imageSmoothingEnabled = false;
+-    tctx.drawImage(img, sx, sy, s, s, 0, 0, 20, 20);
+-    return thumb;
+-  }
+-
+-  async function handleComicFile(file){
+-    if (!COMIC_EXT_RE.test(file.name)){
+-      showStatus(`Skipped "${file.name}" — only .cbz/.cbr/.zip/.rar supported`);
+-      return;
+-    }
+-    showStatus(`Extracting "${file.name}"…`);
+-    try {
+-      const comic = await decodeComicArchive(file);
+-      const coverUrl = comic.cache.urlFor(0, comic.pages[0].file);
+-      const img = await new Promise((resolve, reject) => {
+-        const im = new Image();
+-        im.onload = () => resolve(im);
+-        im.onerror = () => reject(new Error('Could not decode cover page'));
+-        im.src = coverUrl;
+-      });
+-      const thumb = makeThumbFromImage(img);
+-      const dominant = extractDominantColor(thumb);
+-      const baseHex = shade(dominant, -0.28);
+-      const accentHex = shade(dominant, 0.32);
+-      const title = file.name.replace(/\.[^.]+$/, '');
+-      showStatus(`"${title}" — ${comic.pages.length} page${comic.pages.length===1?'':'s'}`);
+-      placePlot(title, baseHex, accentHex, dominant, thumb, comic);
+-    } catch (err){
+-      showStatus(`Failed to read "${file.name}": ${err.message}`);
+-    }
+-  }
+-
+-  fileInput.addEventListener('change', async (e) => {
+-    const files = Array.from(e.target.files || []);
+-    e.target.value = '';
+-    // Sequential on purpose: each open() spins up its own WASM worker, and
+-    // running a stack of large archives in parallel is a good way to stall
+-    // the tab on a phone. One at a time keeps status messages honest too.
+-    for (const file of files) await handleComicFile(file);
+-  });
+-
+-  const mockTitles = ['Untitled Draft','Working Copy','No Cover Yet','Placeholder Vol.','Draft Pages','Scan Batch'];
+-  let mockCounter = 0;
+-  addMockBtn.addEventListener('click', () => {
+-    mockCounter++;
+-    const title = `${mockTitles[(mockCounter-1)%mockTitles.length]} #${mockCounter}`;
+-    const hue = hashHue(title);
+-    const dominant = hslToHex(hue, 40, 46);
+-    const baseHex = shade(dominant, -0.28);
+-    const accentHex = shade(dominant, 0.32);
+-    placePlot(title, baseHex, accentHex, dominant, makePlaceholderCoverCanvas(dominant));
+-  });
+-
+-  addMockBtn.click();
+-  addMockBtn.click();
+-
+-  // stars
+-  const starGeo = new THREE.BufferGeometry();
+-  const starCount = 160;
+-  const starPos = new Float32Array(starCount*3);
+-  for (let i=0;i<starCount;i++){ starPos[i*3]=(Math.random()-0.5)*70; starPos[i*3+1]=6+Math.random()*16; starPos[i*3+2]=(Math.random()-0.5)*70; }
+-  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos,3));
+-  const starMat = new THREE.PointsMaterial({ size:0.1, map:makeNearestTexture(makeStarTexture()), transparent:true, depthWrite:false });
+-  scene.add(new THREE.Points(starGeo, starMat));
+-
+-  // ---------- hover / click / fly-in / reader ----------
+-  const raycaster = new THREE.Raycaster();
+-  const mouse = new THREE.Vector2();
+-  let hovered = null;
+-
+-  window.addEventListener('mousemove', (e) => {
+-    const rect = renderer.domElement.getBoundingClientRect();
+-    mouse.x = ((e.clientX-rect.left)/rect.width)*2-1;
+-    mouse.y = -((e.clientY-rect.top)/rect.height)*2+1;
+-    tooltip.style.left = (e.clientX+14)+'px';
+-    tooltip.style.top = (e.clientY+14)+'px';
+-  });
+-
+-  window.addEventListener('click', (e) => {
+-    if (e.target.closest('#hud') || e.target.closest('#reader') || e.target.closest('#scrim')) return;
+-    if (focusedPlot || camAnim) return;
+-    if (hovered && hovered.lit) enterPlot(hovered);
+-  });
+-
+-  function updateHover(){
+-    if (focusedPlot || camAnim){ tooltip.style.opacity = '0'; return; }
+-    raycaster.setFromCamera(mouse, camera);
+-    const hits = raycaster.intersectObjects(plots.map(p=>p.building));
+-    if (hits.length){
+-      const hitPlot = plots.find(p=>p.building===hits[0].object);
+-      if (hovered!==hitPlot){ if(hovered) hovered.group.scale.set(1,1,1); hovered=hitPlot; }
+-      hovered.group.scale.set(1.05,1.05,1.05);
+-      tooltip.textContent = hovered.lit ? `${hovered.label} — click to enter` : `${hovered.label} (analyzing…)`;
+-      tooltip.style.opacity = '1';
+-    } else {
+-      if (hovered) hovered.group.scale.set(1,1,1);
+-      hovered = null; tooltip.style.opacity = '0';
+-    }
+-  }
+-
+-  function setControlsEnabled(enabled){
+-    fileInput.disabled = !enabled;
+-    addMockBtn.disabled = !enabled;
+-    uploadLabel.classList.toggle('disabled', !enabled);
+-    hud.style.opacity = enabled ? '1' : '0.35';
+-  }
+-
+-  function enterPlot(plot){
+-    focusedPlot = plot;
+-    setControlsEnabled(false);
+-    tooltip.style.opacity = '0';
+-    const lookAt = plot.group.position.clone().add(new THREE.Vector3(0, 1.1, 0));
+-    animateCameraTo(4.2, 7, lookAt, 1100, () => openReader(plot));
+-  }
+-
+-  function renderReaderPage(plot, index){
+-    const { pages, cache } = plot.comic;
+-    readerPageIndex = Math.max(0, Math.min(index, pages.length-1));
+-    pageImg.classList.remove('loaded');
+-    pageSpinner.classList.add('active');
+-    const url = cache.urlFor(readerPageIndex, pages[readerPageIndex].file);
+-    pageImg.onload = () => { pageImg.classList.add('loaded'); pageSpinner.classList.remove('active'); };
+-    pageImg.src = url;
+-    pageCounter.textContent = `${readerPageIndex+1} / ${pages.length}`;
+-    pagePrev.disabled = readerPageIndex === 0;
+-    pageNext.disabled = readerPageIndex === pages.length-1;
+-    // Warm the next/prev couple of pages so paging feels instant without
+-    // decoding the whole book up front.
+-    for (const i of [readerPageIndex-1, readerPageIndex+1, readerPageIndex+2]){
+-      if (i >= 0 && i < pages.length) cache.warm(i, pages[i].file);
+-    }
+-  }
+-
+-  function turnPage(delta){
+-    const plot = focusedPlot;
+-    if (!plot || !plot.comic) return;
+-    renderReaderPage(plot, readerPageIndex + delta);
+-  }
+-  pagePrev.addEventListener('click', () => turnPage(-1));
+-  pageNext.addEventListener('click', () => turnPage(1));
+-
+-  function openReader(plot){
+-    readerTitle.textContent = plot.label;
+-    const rctx = readerCover.getContext('2d');
+-    rctx.clearRect(0,0,20,20);
+-    rctx.drawImage(plot.coverCanvas, 0, 0);
+-
+-    if (plot.comic && plot.comic.pages.length){
+-      readerFallback.style.display = 'none';
+-      pageView.classList.add('active');
+-      renderReaderPage(plot, 0);
+-    } else {
+-      readerFallback.style.display = '';
+-      readerFallback.textContent = 'This plot has no comic attached — it was added via "+ Add mock", not a real .cbz/.cbr upload.';
+-      pageView.classList.remove('active');
+-    }
+-
+-    scrim.classList.add('open');
+-    reader.classList.add('open');
+-    readerClose.focus();
+-  }
+-
+-  function closeReader(){
+-    scrim.classList.remove('open');
+-    reader.classList.remove('open');
+-    pageView.classList.remove('active');
+-    setControlsEnabled(true);
+-    const rows = Math.max(1, builtRows);
+-    const midZ = rowStartZ + (rows-1)*(zSpacing/2);
+-    const vs = 11 + rows*2.0, dist = 15 + rows*2.0;
+-    animateCameraTo(vs, dist, new THREE.Vector3(0,0,midZ), 900, () => { focusedPlot = null; });
+-  }
+-  readerClose.addEventListener('click', closeReader);
+-  scrim.addEventListener('click', closeReader);
+-  document.addEventListener('keydown', (e) => {
+-    if (!reader.classList.contains('open')) return;
+-    if (e.key==='Escape') closeReader();
+-    else if (e.key==='ArrowLeft') turnPage(-1);
+-    else if (e.key==='ArrowRight') turnPage(1);
+-  });
+-
+-  function animate(now){
+-    requestAnimationFrame(animate);
+-    if (camAnim){
+-      const t = Math.min((now-camAnim.start)/camAnim.duration, 1);
+-      const e = easeInOutCubic(t);
+-      const vs = camAnim.startVs + (camAnim.endVs-camAnim.startVs)*e;
+-      const dist = camAnim.startDist + (camAnim.endDist-camAnim.startDist)*e;
+-      const lookAt = new THREE.Vector3().lerpVectors(camAnim.startLookAt, camAnim.endLookAt, e);
+-      setCameraFrame(vs, dist, lookAt);
+-      if (t >= 1){ const done = camAnim.onDone; camAnim = null; if (done) done(); }
+-    }
+-    updateHover();
+-    renderer.render(scene, camera);
+-  }
+-  updateCameraFit();
+-  requestAnimationFrame(animate);
+-})();
+-</script>
+-
+-</body>
+-</html>
+-
+-  scene.add(new THREE.AmbientLight(0x2e2a3c, 1.2));
+-  const moon = new THREE.DirectionalLight(0xcfd0ff, 0.75); moon.position.set(-8,12,6); scene.add(moon);
+-  const warmFill = new THREE.PointLight(0x6a4fd9, 0.4, 30); warmFill.position.set(6,4,-6); scene.add(warmFill);
+-
+-  const groundMat = new THREE.MeshStandardMaterial({ map: makeNearestTexture(makeGroundTexture()), roughness:1 });
+-  const streetMat = new THREE.MeshStandardMaterial({ map: makeNearestTexture(makeStreetTexture()), roughness:1 });
+-
+-  let groundMesh=null, streetMesh=null;
+-  const zSpacing = 6, rowStartZ = -6;
+-
+-  function rebuildGroundAndStreet(rows){
+-    if (groundMesh){ scene.remove(groundMesh); groundMesh.geometry.dispose(); }
+-    if (streetMesh){ scene.remove(streetMesh); streetMesh.geometry.dispose(); }
+-    const minZ = rowStartZ - 5, maxZ = rowStartZ + (rows-1)*zSpacing + 5;
+-    const length = maxZ - minZ, centerZ = (minZ+maxZ)/2;
+-    groundMat.map.repeat.set(10, length/2.4);
+-    streetMat.map.repeat.set(2, length/1.83);
+-    groundMesh = new THREE.Mesh(new THREE.PlaneGeometry(24, length), groundMat);
+-    groundMesh.rotation.x = -Math.PI/2; groundMesh.position.z = centerZ; scene.add(groundMesh);
+-    streetMesh = new THREE.Mesh(new THREE.PlaneGeometry(3, length), streetMat);
+-    streetMesh.rotation.x = -Math.PI/2; streetMesh.position.y = 0.01; streetMesh.position.z = centerZ; scene.add(streetMesh);
+-  }
+-
+-  // ---------- camera framing + fly-in ----------
+-  // The camera always sits at (lookAt + dist*ISO_DIR) — dollying along a
+-  // fixed isometric direction while the frustum size (vs) and the look
+-  // target change is what makes "zoom to the whole town" and "fly in to
+-  // one plot" feel like the same camera, not two different modes.
+-  const ISO_DIR = { x:1, y:0.875, z:0.6 };
+-  let currentVs = 12, currentDist = 16, currentLookAt = new THREE.Vector3(0,0,0);
+-  let builtRows = 0;
+-  let focusedPlot = null;
+-  let camAnim = null;
+-
+-  function setCameraFrame(vs, dist, lookAt){
+-    const a = window.innerWidth/window.innerHeight;
+-    camera.left=-vs*a; camera.right=vs*a; camera.top=vs; camera.bottom=-vs;
+-    camera.position.set(lookAt.x+dist*ISO_DIR.x, lookAt.y+dist*ISO_DIR.y, lookAt.z+dist*ISO_DIR.z);
+-    camera.lookAt(lookAt);
+-    camera.updateProjectionMatrix();
+-    currentVs = vs; currentDist = dist; currentLookAt = lookAt.clone();
+-  }
+-
+-  function easeInOutCubic(t){ return t<0.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2; }
+-
+-  function animateCameraTo(vs, dist, lookAt, duration, onDone){
+-    camAnim = {
+-      startVs: currentVs, startDist: currentDist, startLookAt: currentLookAt.clone(),
+-      endVs: vs, endDist: dist, endLookAt: lookAt.clone(),
+-      start: performance.now(), duration, onDone
+-    };
+-  }
+-
+-  function updateCameraFit(){
+-    if (focusedPlot || camAnim) return; // don't fight an active focus/animation
+-    const rows = Math.max(1, builtRows);
+-    const midZ = rowStartZ + (rows-1)*(zSpacing/2);
+-    const vs = 11 + rows*2.0;
+-    const dist = 15 + rows*2.0;
+-    setCameraFrame(vs, dist, new THREE.Vector3(0,0,midZ));
+-  }
+-
+-  resizeRenderer();
+-  window.addEventListener('resize', () => { resizeRenderer(); updateCameraFit(); });
+-
+-  // ---------- plots ----------
+-  const plotGroup = new THREE.Group();
+-  scene.add(plotGroup);
+-  const plots = [];
+-
+-  function computeSlotPosition(n){
+-    const side = n%2===0 ? -1 : 1;
+-    const row = Math.floor(n/2);
+-    return { x: side*5.5, z: rowStartZ + row*zSpacing, side };
+-  }
+-
+-  function createPlot(index, title, baseHex, accentHex, coverCanvas){
+-    const { x, z, side } = computeSlotPosition(index);
+-    const g = new THREE.Group();
+-    g.position.set(x, 0, z);
+-
+-    const base = new THREE.Mesh(new THREE.BoxGeometry(2.6,0.15,2.6), new THREE.MeshStandardMaterial({ color:0x2a2634, roughness:1 }));
+-    base.position.y = 0.075; g.add(base);
+-
+-    const facadeTex = makeNearestTexture(makeBuildingTexture(baseHex, accentHex));
+-    const building = new THREE.Mesh(new THREE.BoxGeometry(1.6,1.6,1.6), new THREE.MeshStandardMaterial({ map: facadeTex, roughness:0.9 }));
+-    building.position.y = 0.15+0.8; g.add(building);
+-
+-    const roof = new THREE.Mesh(new THREE.ConeGeometry(1.3,0.9,4), new THREE.MeshStandardMaterial({ color:0x1c1822, roughness:1 }));
+-    roof.rotation.y = Math.PI/4; roof.position.y = 0.15+1.6+0.45; g.add(roof);
+-
+-    const signTex = makeNearestTexture(coverCanvas);
+-    const sign = new THREE.Mesh(new THREE.PlaneGeometry(0.9,0.9), new THREE.MeshStandardMaterial({ map: signTex, roughness:1, side: THREE.DoubleSide }));
+-    sign.position.set(0,1.0,1.35); g.add(sign);
+-    const signPost = new THREE.Mesh(new THREE.BoxGeometry(0.08,0.5,0.08), new THREE.MeshStandardMaterial({ color:0x1c1822 }));
+-    signPost.position.set(0,0.4,1.35); g.add(signPost);
+-
+-    const lampGroup = new THREE.Group();
+diff --git a/package-lock.json b/package-lock.json
+index 659963d..f6c5f36 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -8,11 +8,11 @@
+       "name": "hogarth",
+       "version": "0.1.0",
+       "dependencies": {
++        "jszip": "^3.10.1",
+         "three": "^0.128.0"
+       },
+       "devDependencies": {
+         "@playwright/test": "^1.39.1",
+-        "jszip": "^3.10.1",
+         "vite": "^8.2.0"
+       }
+     },
+@@ -374,7 +374,6 @@
+       "version": "1.0.3",
+       "resolved": "https://registry.npmjs.org/core-util-is/-/core-util-is-1.0.3.tgz",
+       "integrity": "sha512-ZQBvi1DcpJ4GDqanjucZ2Hj3wEO5pZDS89BWbkcrvdxksJorwUDDZamX9ldFkp9aw2lmBDLgkObEA4DWNJ9FYQ==",
+-      "dev": true,
+       "license": "MIT"
+     },
+     "node_modules/detect-libc": {
+@@ -406,9 +405,9 @@
+       }
+     },
+     "node_modules/fsevents": {
+-      "version": "2.3.3",
+-      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+-      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
++      "version": "2.3.2",
++      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.2.tgz",
++      "integrity": "sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA==",
+       "dev": true,
+       "hasInstallScript": true,
+       "license": "MIT",
+@@ -424,28 +423,24 @@
+       "version": "3.0.6",
+       "resolved": "https://registry.npmjs.org/immediate/-/immediate-3.0.6.tgz",
+       "integrity": "sha512-XXOFtyqDjNDAQxVfYxuF7g9Il/IbWmmlQg2MYKOH8ExIT1qg6xc4zyS3HaEEATgs1btfzxq15ciUiY7gjSXRGQ==",
+-      "dev": true,
+       "license": "MIT"
+     },
+     "node_modules/inherits": {
+       "version": "2.0.4",
+       "resolved": "https://registry.npmjs.org/inherits/-/inherits-2.0.4.tgz",
+       "integrity": "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==",
+-      "dev": true,
+       "license": "ISC"
+     },
+     "node_modules/isarray": {
+       "version": "1.0.0",
+       "resolved": "https://registry.npmjs.org/isarray/-/isarray-1.0.0.tgz",
+       "integrity": "sha512-VLghIWNM6ELQzo7zwmcg0NmTVyWKYjvIeM83yjp0wRDTmUnrM678fQbcKBo6n2CJEF0szoG//ytg+TKla89ALQ==",
+-      "dev": true,
+       "license": "MIT"
+     },
+     "node_modules/jszip": {
+       "version": "3.10.1",
+       "resolved": "https://registry.npmjs.org/jszip/-/jszip-3.10.1.tgz",
+       "integrity": "sha512-xXDvecyTpGLrqFrvkrUSoxxfJI5AH7U8zxxtVclpsUtMCq4JQ290LY8AW5c7Ggnr/Y/oK+bQMbqK2qmtk3pN4g==",
+-      "dev": true,
+       "license": "(MIT OR GPL-3.0-or-later)",
+       "dependencies": {
+         "lie": "~3.3.0",
+@@ -458,7 +453,6 @@
+       "version": "3.3.0",
+       "resolved": "https://registry.npmjs.org/lie/-/lie-3.3.0.tgz",
+       "integrity": "sha512-UaiMJzeWRlEujzAuw5LokY1L5ecNQYZKfmyZ9L7wDHb/p5etKaxXhohBcrw0EYby+G/NA52vRSN4N39dxHAIwQ==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "immediate": "~3.0.5"
+@@ -748,7 +742,6 @@
+       "version": "1.0.11",
+       "resolved": "https://registry.npmjs.org/pako/-/pako-1.0.11.tgz",
+       "integrity": "sha512-4hLB8Py4zZce5s4yd9XzopqwVv/yGNhV1Bl8NTmCq1763HeK2+EwVTv+leGeL13Dnh2wfbqowVPXCIO0z4taYw==",
+-      "dev": true,
+       "license": "(MIT AND Zlib)"
+     },
+     "node_modules/picocolors": {
+@@ -803,21 +796,6 @@
+         "node": ">=20"
+       }
+     },
+-    "node_modules/playwright/node_modules/fsevents": {
+-      "version": "2.3.2",
+-      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.2.tgz",
+-      "integrity": "sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA==",
+-      "dev": true,
+-      "hasInstallScript": true,
+-      "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "darwin"
+-      ],
+-      "engines": {
+-        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+-      }
+-    },
+     "node_modules/postcss": {
+       "version": "8.5.25",
+       "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.25.tgz",
+@@ -851,14 +829,12 @@
+       "version": "2.0.1",
+       "resolved": "https://registry.npmjs.org/process-nextick-args/-/process-nextick-args-2.0.1.tgz",
+       "integrity": "sha512-3ouUOpQhtgrbOa17J7+uxOTpITYWaGP7/AhoR3+A+/1e9skrzelGi/dXzEYyvbxubEF6Wn2ypscTKiKJFFn1ag==",
+-      "dev": true,
+       "license": "MIT"
+     },
+     "node_modules/readable-stream": {
+       "version": "2.3.8",
+       "resolved": "https://registry.npmjs.org/readable-stream/-/readable-stream-2.3.8.tgz",
+       "integrity": "sha512-8p0AUk4XODgIewSi0l8Epjs+EVnWiK7NoDIEGU0HhE7+ZyY8D1IMY7odu5lRrFXGg71L15KG8QrPmum45RTtdA==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "core-util-is": "~1.0.0",
+@@ -908,14 +884,12 @@
+       "version": "5.1.2",
+       "resolved": "https://registry.npmjs.org/safe-buffer/-/safe-buffer-5.1.2.tgz",
+       "integrity": "sha512-Gd2UZBJDkXlY7GbJxfsE8/nvKkUEU1G38c1siN6QP6a9PT9MmHB8GnpscSmMJSoF8LOIrt8ud/wPtojys4G6+g==",
+-      "dev": true,
+       "license": "MIT"
+     },
+     "node_modules/setimmediate": {
+       "version": "1.0.5",
+       "resolved": "https://registry.npmjs.org/setimmediate/-/setimmediate-1.0.5.tgz",
+       "integrity": "sha512-MATJdZp8sLqDl/68LfQmbP8zKPLQNV6BIZoIgrscFDQ+RsvK/BxeDQOgyxKKoh0y/8h3BqVFnCqQ/gd+reiIXA==",
+-      "dev": true,
+       "license": "MIT"
+     },
+     "node_modules/source-map-js": {
+@@ -932,7 +906,6 @@
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/string_decoder/-/string_decoder-1.1.1.tgz",
+       "integrity": "sha512-n/ShnvDi6FHbbVfviro+WojiFzv+s8MPMHBczVePfUpDJLwoLT0ht1l4YwBCbi8pJAveEEdnkHyPyTP/mzRfwg==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "safe-buffer": "~5.1.0"
+@@ -973,7 +946,6 @@
+       "version": "1.0.2",
+       "resolved": "https://registry.npmjs.org/util-deprecate/-/util-deprecate-1.0.2.tgz",
+       "integrity": "sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw==",
+-      "dev": true,
+       "license": "MIT"
+     },
+     "node_modules/vite": {
+@@ -1053,6 +1025,21 @@
+           "optional": true
+         }
+       }
++    },
++    "node_modules/vite/node_modules/fsevents": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
++      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
++      "dev": true,
++      "hasInstallScript": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
++      }
+     }
+   }
+ }
+diff --git a/package.json b/package.json
+index 7a30d13..8450227 100644
+--- a/package.json
++++ b/package.json
+@@ -9,12 +9,11 @@
+     "test:ui": "playwright test"
+   },
+   "dependencies": {
+-    "three": "^0.128.0"
++    "three": "^0.128.0",
++    "jszip": "^3.10.1"
+   },
+   "devDependencies": {
+     "vite": "^8.2.0",
+-    "@playwright/test": "^1.39.1",
+-    "jszip": "^3.10.1",
+-    "unrar-js": "^1.2.0"
++    "@playwright/test": "^1.39.1"
+   }
+ }
+diff --git a/legacy-landing.html b/public/legacy-landing.html
+similarity index 100%
+rename from legacy-landing.html
+rename to public/legacy-landing.html
+diff --git a/stages/stage1-boot.html b/public/stages/stage1-boot.html
+similarity index 100%
+rename from stages/stage1-boot.html
+rename to public/stages/stage1-boot.html
+diff --git a/legacy-prototype/stages/stage2-town-static.html b/public/stages/stage2-town-static.html
+similarity index 100%
+rename from legacy-prototype/stages/stage2-town-static.html
+rename to public/stages/stage2-town-static.html
+diff --git a/legacy-prototype/stages/stage3-town-dynamic.html b/public/stages/stage3-town-dynamic.html
+similarity index 100%
+rename from legacy-prototype/stages/stage3-town-dynamic.html
+rename to public/stages/stage3-town-dynamic.html
+diff --git a/legacy-prototype/stages/stage4-cover-analysis.html b/public/stages/stage4-cover-analysis.html
+similarity index 100%
+rename from legacy-prototype/stages/stage4-cover-analysis.html
+rename to public/stages/stage4-cover-analysis.html
+diff --git a/stages/stage5-enter-reader.html b/public/stages/stage5-enter-reader.html
+similarity index 100%
+rename from stages/stage5-enter-reader.html
+rename to public/stages/stage5-enter-reader.html
+diff --git a/src/boot/BootScene.js b/src/boot/BootScene.js
+index efd42b4..ce1442e 100644
+--- a/src/boot/BootScene.js
++++ b/src/boot/BootScene.js
+@@ -1,23 +1,279 @@
++import * as THREE from 'three';
++import {
++  makeNearestTexture,
++  makePlanetTexture,
++  makeFlashTexture,
++  makeParticleTexture,
++  makeStarTexture,
++  sampleOpaqueColors
++} from '../world/textures.js';
+ import { updateCameraFit } from '../core/cameraRig.js';
+ 
++// The real boot sequence: two pixel-art bodies approach, make actual
++// surface contact, squash on impact with a camera shake, shatter into
++// debris colored from their own textures, then a pixel-dissolve wipe
++// carries the screen to red and then black before handing off to TOWN.
++//
++// This owns a group of objects added to the shared scene/camera passed in
++// from main.js, plus its own DOM overlay for the pixel-dissolve wipes and
++// the wordmark -- everything is cleaned up again in exit().
++
++const ISO_DIR = { x: 1, y: 0.875, z: 0.6 };
++const RADIUS_A = 1.6, RADIUS_B = 1.15;
++
++function hexToRGBInts(hex){
++  return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
++}
++function easeInOutCubic(t){ return t<0.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2; }
++
+ export default function BootScene({ scene, camera, container, appState }){
+   let mounted = false;
++  let group = null;
++  let overlay = null;
++  let redCanvas, blackCanvas, wordmarkCanvas;
++  let redThresh, blackThresh;
++  let rafId = null;
++  let finished = false;
++
++  function buildOverlayDom(){
++    overlay = document.createElement('div');
++    overlay.style.position = 'fixed'; overlay.style.inset = '0'; overlay.style.zIndex = '50'; overlay.style.pointerEvents = 'none';
++
++    redCanvas = document.createElement('canvas');
++    redCanvas.width = 64; redCanvas.height = 36;
++    Object.assign(redCanvas.style, { position:'fixed', inset:'0', width:'100%', height:'100%', imageRendering:'pixelated', zIndex:'10' });
++
++    blackCanvas = document.createElement('canvas');
++    blackCanvas.width = 64; blackCanvas.height = 36;
++    Object.assign(blackCanvas.style, { position:'fixed', inset:'0', width:'100%', height:'100%', imageRendering:'pixelated', zIndex:'11' });
++
++    wordmarkCanvas = document.createElement('canvas');
++    wordmarkCanvas.width = 220; wordmarkCanvas.height = 40;
++    Object.assign(wordmarkCanvas.style, {
++      position:'fixed', top:'50%', left:'50%', transform:'translate(-50%,-50%)',
++      width:'min(72vw, 640px)', height:'auto', imageRendering:'pixelated',
++      opacity:'0', transition:'opacity 1.2s ease', zIndex:'20'
++    });
++
++    const skip = document.createElement('button');
++    skip.textContent = 'Skip →';
++    Object.assign(skip.style, {
++      position:'fixed', bottom:'28px', right:'28px', zIndex:'60', pointerEvents:'auto',
++      fontFamily:'IBM Plex Mono, monospace', fontSize:'11px', letterSpacing:'0.1em', textTransform:'uppercase',
++      color:'rgba(255,255,255,0.55)', background:'none', border:'1px solid rgba(255,255,255,0.25)', padding:'8px 14px', cursor:'pointer'
++    });
++    skip.addEventListener('click', () => finish());
++
++    overlay.appendChild(redCanvas);
++    overlay.appendChild(blackCanvas);
++    overlay.appendChild(wordmarkCanvas);
++    overlay.appendChild(skip);
++    container.appendChild(overlay);
++
++    drawWordmark();
++    if (document.fonts && document.fonts.load){
++      document.fonts.load('20px "Press Start 2P"').then(drawWordmark).catch(()=>{});
++    }
++  }
++
++  function drawWordmark(){
++    const ctx = wordmarkCanvas.getContext('2d');
++    ctx.clearRect(0,0,wordmarkCanvas.width,wordmarkCanvas.height);
++    ctx.fillStyle = '#f0ece2';
++    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
++    ctx.font = '20px "Press Start 2P", monospace';
++    ctx.fillText('HOGARTH', wordmarkCanvas.width/2, wordmarkCanvas.height/2 + 2);
++  }
++
++  function makeThresholds(cols, rows){
++    const arr = new Float32Array(cols*rows);
++    for (let i=0;i<arr.length;i++) arr[i] = Math.random();
++    return arr;
++  }
++  function paintWipe(canvas, thresholds, rgb, coverage){
++    const ctx = canvas.getContext('2d');
++    const img = ctx.createImageData(canvas.width, canvas.height);
++    for (let i=0;i<thresholds.length;i++){
++      const idx = i*4;
++      if (thresholds[i] <= coverage){
++        img.data[idx]=rgb[0]; img.data[idx+1]=rgb[1]; img.data[idx+2]=rgb[2]; img.data[idx+3]=255;
++      } else { img.data[idx+3]=0; }
++    }
++    ctx.putImageData(img,0,0);
++  }
++  function animateWipe(canvas, thresholds, rgb, durationMs, onDone){
++    const start = performance.now();
++    function step(now){
++      const t = Math.min((now-start)/durationMs, 1);
++      paintWipe(canvas, thresholds, rgb, t);
++      if (t < 1) requestAnimationFrame(step); else if (onDone) onDone();
++    }
++    requestAnimationFrame(step);
++  }
++
++  function finish(){
++    if (finished) return;
++    finished = true;
++    if (rafId) cancelAnimationFrame(rafId);
++    if (mounted) appState.go('TOWN');
++  }
++
+   return {
+     async enter(){
+       mounted = true;
+-      // simple boot: wait 1200ms then transition to TOWN
+-      const el = document.createElement('div'); el.id = 'boot-skip'; el.style.position='fixed'; el.style.inset='0'; el.style.cursor='pointer'; el.title='Skip boot';
+-      container.appendChild(el);
+-      const skip = ()=>{ if (mounted) appState.go('TOWN'); };
+-      el.addEventListener('click', skip, { once: true });
+-      // ensure camera framing is correct on boot end
+-      updateCameraFit(camera, 1);
+-      await new Promise(res => setTimeout(res, 1200));
+-      if (mounted) await appState.go('TOWN');
++      finished = false;
++
++      buildOverlayDom();
++      redThresh = makeThresholds(64, 36);
++      blackThresh = makeThresholds(64, 36);
++
++      group = new THREE.Group();
++      scene.add(group);
++
++      camera.position.set(0, 0, 9);
++      camera.left = -6; camera.right = 6; camera.top = 6; camera.bottom = -6;
++      camera.zoom = 1;
++      camera.lookAt(0, 0, 0);
++      camera.updateProjectionMatrix();
++
++      const rockCanvas = makePlanetTexture('rock');
++      const lavaCanvas = makePlanetTexture('lava');
++      const rockDebrisColors = sampleOpaqueColors(rockCanvas, 40, 6);
++      const lavaDebrisColors = sampleOpaqueColors(lavaCanvas, 40, 6);
++
++      const bodyA = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeNearestTexture(rockCanvas), transparent:true }));
++      bodyA.scale.set(RADIUS_A*2, RADIUS_A*2, 1);
++      const startA = new THREE.Vector3(-6, -1.2, 0);
++      bodyA.position.copy(startA);
++      group.add(bodyA);
++
++      const bodyB = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeNearestTexture(lavaCanvas), transparent:true }));
++      bodyB.scale.set(RADIUS_B*2, RADIUS_B*2, 1);
++      const startB = new THREE.Vector3(6, 1.5, -1);
++      bodyB.position.copy(startB);
++      group.add(bodyB);
++
++      const impactCenter = new THREE.Vector3(0, 0.1, -0.4);
++      const dir = new THREE.Vector3().subVectors(startB, startA).normalize();
++      const finalA = impactCenter.clone().addScaledVector(dir, -RADIUS_A);
++      const finalB = impactCenter.clone().addScaledVector(dir, RADIUS_B);
++
++      const flash = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeNearestTexture(makeFlashTexture()), transparent:true, opacity:0 }));
++      flash.scale.set(0.6,0.6,1);
++      flash.position.copy(impactCenter);
++      group.add(flash);
++
++      const PARTICLE_COUNT = 70;
++      const debrisSprites = [], debrisVel = [];
++      for (let i=0;i<PARTICLE_COUNT;i++){
++        const palette = i % 2 === 0 ? rockDebrisColors : lavaDebrisColors;
++        const hex = palette[Math.floor(Math.random()*palette.length)];
++        const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeNearestTexture(makeParticleTexture(hex)), transparent:true, opacity:0 }));
++        spr.scale.set(0.2 + Math.random()*0.14, 0.2 + Math.random()*0.14, 1);
++        spr.position.copy(impactCenter);
++        group.add(spr);
++        debrisSprites.push(spr);
++        const theta = Math.random()*Math.PI*2, speed = 2.2 + Math.random()*5.2;
++        debrisVel.push(new THREE.Vector3(Math.cos(theta)*speed, Math.sin(theta)*speed, (Math.random()-0.5)*2.2));
++      }
++
++      const SPARK_COUNT = 14;
++      const sparkSprites = [], sparkVel = [];
++      for (let i=0;i<SPARK_COUNT;i++){
++        const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeNearestTexture(makeParticleTexture('#fff6dd')), transparent:true, opacity:0 }));
++        spr.scale.set(0.14,0.14,1);
++        spr.position.copy(impactCenter);
++        group.add(spr);
++        sparkSprites.push(spr);
++        const theta = Math.random()*Math.PI*2;
++        sparkVel.push(new THREE.Vector3(Math.cos(theta)*1.8, Math.sin(theta)*1.8, (Math.random()-0.5)*1.2));
++      }
++
++      const starGeo = new THREE.BufferGeometry();
++      const starCount = 120;
++      const starPos = new Float32Array(starCount*3);
++      for (let i=0;i<starCount;i++){ starPos[i*3]=(Math.random()-0.5)*40; starPos[i*3+1]=(Math.random()-0.5)*24; starPos[i*3+2]=-10-Math.random()*15; }
++      starGeo.setAttribute('position', new THREE.BufferAttribute(starPos,3));
++      const starMat = new THREE.PointsMaterial({ size:0.12, map: makeNearestTexture(makeStarTexture()), transparent:true, depthWrite:false });
++      const stars = new THREE.Points(starGeo, starMat);
++      group.add(stars);
++
++      const camBase = new THREE.Vector3(0,0,9);
++      let phase = 'approach';
++      let phaseStart = performance.now();
++      const APPROACH_MS = 2100, IMPACT_MS = 170, EXPLODE_MS = 950;
++      let redStarted = false;
++
++      function step(now){
++        if (finished) return;
++        rafId = requestAnimationFrame(step);
++        const elapsed = now - phaseStart;
++
++        if (phase === 'approach'){
++          const t = Math.min(elapsed/APPROACH_MS, 1);
++          const e = easeInOutCubic(t);
++          bodyA.position.lerpVectors(startA, finalA, e);
++          bodyB.position.lerpVectors(startB, finalB, e);
++          camera.position.set(camBase.x, camBase.y, camBase.z - e*1.2);
++          camera.lookAt(0,0,0);
++          if (t >= 1){ phase='impact'; phaseStart=now; sparkSprites.forEach(s=>s.material.opacity=1); }
++        } else if (phase === 'impact'){
++          const t = Math.min(elapsed/IMPACT_MS, 1);
++          const squash = 1 - 0.35*Math.sin(t*Math.PI);
++          const bulge = 1 + 0.25*Math.sin(t*Math.PI);
++          bodyA.scale.set(RADIUS_A*2*bulge, RADIUS_A*2*squash, 1);
++          bodyB.scale.set(RADIUS_B*2*bulge, RADIUS_B*2*squash, 1);
++          const shake = (1-t)*0.09;
++          camera.position.x = camBase.x + (Math.random()-0.5)*shake;
++          camera.position.y = camBase.y + (Math.random()-0.5)*shake;
++          const dt = elapsed/1000;
++          for (let i=0;i<SPARK_COUNT;i++){
++            sparkSprites[i].position.set(impactCenter.x+sparkVel[i].x*dt, impactCenter.y+sparkVel[i].y*dt, impactCenter.z+sparkVel[i].z*dt);
++            sparkSprites[i].material.opacity = Math.max(0, 1-t);
++          }
++          if (t >= 1){
++            phase='explode'; phaseStart=now;
++            bodyA.visible=false; bodyB.visible=false;
++            flash.material.opacity=1;
++            debrisSprites.forEach(s=>s.material.opacity=1);
++            sparkSprites.forEach(s=>s.material.opacity=0);
++          }
++        } else if (phase === 'explode'){
++          const t = Math.min(elapsed/EXPLODE_MS, 1);
++          const dt = elapsed/1000;
++          for (let i=0;i<PARTICLE_COUNT;i++){
++            debrisSprites[i].position.set(impactCenter.x+debrisVel[i].x*dt, impactCenter.y+debrisVel[i].y*dt, impactCenter.z+debrisVel[i].z*dt);
++            debrisSprites[i].material.opacity = Math.max(0, 1-t);
++          }
++          flash.material.opacity = Math.max(0, 1 - t*1.5);
++          flash.scale.setScalar(3.4 + t*4);
++
++          if (t > 0.3 && !redStarted){
++            redStarted = true;
++            animateWipe(redCanvas, redThresh, hexToRGBInts('#a01414'), 520, () => {
++              setTimeout(() => {
++                animateWipe(blackCanvas, blackThresh, hexToRGBInts('#0a0810'), 520, () => {
++                  wordmarkCanvas.style.opacity = '0.95';
++                  updateCameraFit(camera, 1);
++                  setTimeout(finish, 900);
++                });
++              }, 220);
++            });
++          }
++          if (t >= 1) phase = 'done';
++        }
++      }
++      rafId = requestAnimationFrame(step);
++
++      // Also allow clicking anywhere (outside skip button) to fast-forward
++      overlay.style.pointerEvents = 'auto';
++      overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(); });
+     },
+     async exit(){
+       mounted = false;
+-      const el = document.getElementById('boot-skip'); if (el && el.parentNode) el.parentNode.removeChild(el);
++      if (rafId) cancelAnimationFrame(rafId);
++      if (group){ scene.remove(group); group = null; }
++      if (overlay && overlay.parentNode){ overlay.parentNode.removeChild(overlay); overlay = null; }
+     }
+   };
+ }
+diff --git a/src/main.js b/src/main.js
+index 0ffac90..a051cb4 100644
+--- a/src/main.js
++++ b/src/main.js
+@@ -4,14 +4,15 @@ import { AppState } from './core/appState.js';
+ import BootScene from './boot/BootScene.js';
+ import TownScene from './world/TownScene.js';
+ import ReaderPanel from './reader/ReaderPanel.js';
+-import StageScene from './world/StageScene.js';
+ 
+ // Minimal app bootstrap for Vite + Three (r128)
++const appEl = document.getElementById('app');
++
+ const scene = new THREE.Scene();
+ scene.background = new THREE.Color(0x14101c);
+ 
+ const camera = new THREE.OrthographicCamera(-10,10,10,-10,0.1,200);
+-const { renderer, resize } = createPixelRenderer({ pixelScale: 1/6, antialias: false, parent: document.body });
++const { renderer, resize } = createPixelRenderer({ pixelScale: 1/6, antialias: false, parent: appEl });
+ 
+ function onWindowResize(){
+   const a = window.innerWidth / window.innerHeight;
+@@ -27,13 +28,11 @@ const ambient = new THREE.AmbientLight(0x2e2a3c, 1.2);
+ scene.add(ambient);
+ 
+ const appState = new AppState();
+-const boot = BootScene({ scene, camera, container: document.body, appState });
+-const townScene = TownScene({ scene, camera, container: document.body, appState });
++const boot = BootScene({ scene, camera, container: appEl, appState });
++const townScene = TownScene({ scene, camera, container: appEl, appState });
+ appState.register('BOOT', boot);
+ appState.register('TOWN', townScene);
+-const stageScene = StageScene({ container: document.body, appState });
+-appState.register('STAGE', stageScene);
+-const readerPanel = ReaderPanel({ container: document.body, appState });
++const readerPanel = ReaderPanel({ container: appEl, appState });
+ appState.register('READING', readerPanel);
+ appState.go('BOOT');
+ 
+diff --git a/src/reader/ReaderScene.js b/src/reader/ReaderScene.js
+deleted file mode 100644
+index 4408311..0000000
+--- a/src/reader/ReaderScene.js
++++ /dev/null
+@@ -1,25 +0,0 @@
+-export default function ReaderScene({ scene, camera, container, appState }){
+-  let mounted = false;
+-  let overlay = null;
+-  return {
+-    async enter(payload = {}){
+-      mounted = true;
+-      overlay = document.createElement('div');
+-      overlay.style.position = 'fixed'; overlay.style.inset='0'; overlay.style.background='rgba(6,6,10,0.88)'; overlay.style.zIndex='60'; overlay.style.display='flex'; overlay.style.alignItems='center'; overlay.style.justifyContent='center';
+-      const panel = document.createElement('div'); panel.style.padding='18px'; panel.style.background='linear-gradient(180deg, rgba(28,22,39,0.94), rgba(14,11,20,0.96))'; panel.style.border='1px solid rgba(241,236,223,0.08)'; panel.style.maxWidth='80vw'; panel.style.maxHeight='80vh'; panel.style.overflow='auto';
+-      const title = document.createElement('div'); title.textContent = payload.title || 'Reader'; title.style.marginBottom='12px'; title.style.fontFamily='IBM Plex Mono, monospace'; title.style.color='#fff4e1';
+-      const imgWrap = document.createElement('div'); imgWrap.style.display='flex'; imgWrap.style.justifyContent='center';
+-      const img = document.createElement('img'); img.style.maxWidth='60vw'; img.style.maxHeight='60vh'; img.style.imageRendering='pixelated';
+-      if (payload.coverCanvas){ img.src = payload.coverCanvas.toDataURL(); }
+-      else if (payload.coverUrl){ img.src = payload.coverUrl; }
+-      else img.src = 'data:image/svg+xml;utf8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="320" height="480"><rect width="100%" height="100%" fill="#1b1624"/></svg>');
+-      imgWrap.appendChild(img);
+-      const close = document.createElement('button'); close.textContent='Close'; close.style.marginTop='12px'; close.addEventListener('click', ()=> appState.go('TOWN'));
+-      panel.appendChild(title); panel.appendChild(imgWrap); panel.appendChild(close);
+-      overlay.appendChild(panel); container.appendChild(overlay);
+-    },
+-    async exit(){
+-      mounted = false; if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay); overlay = null;
+-    }
+-  };
+-}
+diff --git a/src/reader/archive.js b/src/reader/archive.js
+index c3b34a9..09a3cf6 100644
+--- a/src/reader/archive.js
++++ b/src/reader/archive.js
+@@ -1,4 +1,15 @@
+-// Archive loader, LRU page cache, and decode pipeline extracted from prototype
++// Archive loader, LRU page cache, and decode pipeline.
++//
++// CBZ/ZIP is handled with jszip -- a real bundled dependency, no runtime
++// network fetch required. CBR/RAR is not decoded client-side: no
++// actively-maintained, reliably-licensed pure-JS RAR extractor exists that's
++// safe to depend on here. Rather than chain several fragile CDN-loaded
++// fallbacks that may or may not work depending on the file, we fail
++// honestly and point the person at converting to CBZ. If real RAR support
++// becomes a priority, that's a deliberate feature to scope and build, not
++// something to bolt on as a best-effort fallback.
++import JSZip from 'jszip';
++
+ export class PageCache {
+   constructor(limit = 32){ this.limit = limit; this.map = new Map(); }
+   set(key, value){
+@@ -13,126 +24,41 @@ export class PageCache {
+   get(key){ return this.map.get(key); }
+ }
+ 
+-export async function loadArchiveLib(){
+-  if (window.Archive) return window.Archive;
+-  const script = document.createElement('script');
+-  script.src = 'https://unpkg.com/libarchive.js@2.0.2/dist/libarchive.js';
+-  document.head.appendChild(script);
+-  await new Promise((res, rej) => { script.onload = res; script.onerror = rej; });
+-  return window.Archive;
+-}
++const IMAGE_RE = /\.(jpe?g|png|gif|webp)$/i;
++const RAR_RE = /\.cbr$|\.rar$/i;
+ 
+ export async function decodeComicArchive(file, onProgress){
+-  const Archive = await loadArchiveLib();
++  const name = (file && file.name) || '';
++
++  if (RAR_RE.test(name)){
++    throw new Error('CBR (RAR) archives are not supported yet. Convert to CBZ (ZIP) and re-upload -- see the help dialog for a converter link.');
++  }
++
+   const ab = await file.arrayBuffer();
+-  let n;
++  let zip;
+   try{
+-    n = new Archive(new Uint8Array(ab));
++    zip = await JSZip.loadAsync(ab);
+   } catch (err){
+-    // libarchive may not support RAR/CBR in this build/environment — try JS RAR fallback
+-    const name = (file && file.name) || '';
+-    if (/\.cbr$|\.rar$/i.test(name)){
+-      try{
+-        const entries = await tryUnrarFallback(ab, onProgress);
+-        const cache = new PageCache(64);
+-        for (let i=0;i<entries.length;i++){
+-          const b = entries[i].blob;
+-          const url = URL.createObjectURL(b);
+-          cache.set(i, url);
+-          if (onProgress) onProgress(i, entries.length);
+-        }
+-        return { files: entries.map(e=>({ name: e.name, file: e.blob })), cache };
+-      } catch (uerr){
+-        throw new Error('CBR (RAR) archives are not supported in this environment. Convert to CBZ (ZIP) or upload from a desktop.');
+-      }
+-    }
+-    throw err;
++    throw new Error('Could not read this file as a ZIP/CBZ archive. It may be corrupt or a different format.');
+   }
+ 
+-  const entries = n.getFiles().filter(f=>/\.(jpe?g|png|gif)$/i.test(f.name)).sort((a,b)=>
+-    a.name.localeCompare(b.name, undefined, {numeric:true, sensitivity:'base'}));
+-  const cache = new PageCache(64);
++  const entries = Object.values(zip.files)
++    .filter(f => !f.dir && IMAGE_RE.test(f.name))
++    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
++
+   if (!entries.length){
+-    const name = (file && file.name) || '';
+-    if (/\.cbr$|\.rar$/i.test(name)){
+-      throw new Error('CBR (RAR) archives are not supported in this environment. Convert to CBZ (ZIP) or upload from a desktop.');
+-    }
+     throw new Error('No image files found inside the archive.');
+   }
+ 
+-  for (let i=0;i<entries.length;i++){
+-    const f = entries[i];
+-    const blob = new Blob([f.getData()], { type: /\.png$/i.test(f.name) ? 'image/png' : 'image/jpeg' });
+-    const url = URL.createObjectURL(blob);
++  const cache = new PageCache(64);
++  for (let i = 0; i < entries.length; i++){
++    const entry = entries[i];
++    const blob = await entry.async('blob');
++    const typed = blob.type ? blob : new Blob([blob], { type: /\.png$/i.test(entry.name) ? 'image/png' : 'image/jpeg' });
++    const url = URL.createObjectURL(typed);
+     cache.set(i, url);
+     if (onProgress) onProgress(i, entries.length);
+   }
+-  return { files: entries, cache };
+-}
+-
+-async function tryUnrarFallback(arrayBuffer, onProgress){
+-  const uint8 = new Uint8Array(arrayBuffer);
+-  let module;
+-  try{
+-    const spec = 'unrar' + '-js';
+-    module = await import(spec);
+-  } catch (e){
+-    // If unrar-js is not installed locally, try loading from the unpkg CDN
+-    try{
+-      const cdn = 'https://' + 'unpkg.com/' + 'unrar-js' + '/dist/unrar.esm.js';
+-      module = await import(cdn);
+-    } catch (e2){
+-      throw e;
+-    }
+-  }
+-
+-  const Unrar = module.Unrar || module.default || module;
+-  if (!Unrar) throw new Error('unrar-js not available');
+-
+-  let extractor = null;
+-  if (typeof Unrar.createExtractorFromData === 'function'){
+-    extractor = Unrar.createExtractorFromData({ data: uint8 });
+-  } else if (typeof Unrar.createExtractor === 'function'){
+-    extractor = Unrar.createExtractor(uint8);
+-  } else if (typeof Unrar.extract === 'function'){
+-    const res = Unrar.extract(uint8);
+-    if (res && res.files) return res.files.filter(f=>/\.(jpe?g|png|gif|bmp)$/i.test(f.fileName)).map(f=>({ name:f.fileName, blob:new Blob([f.extraction], { type: 'image/png' }) }));
+-    throw new Error('unsupported unrar-js API');
+-  } else {
+-    throw new Error('unsupported unrar-js API');
+-  }
+-
+-  if (extractor.getFileList && extractor.extractFiles){
+-    const list = extractor.getFileList();
+-    const files = list.fileHeaders || list.files || [];
+-    const out = [];
+-    for (let i=0;i<files.length;i++){
+-      const fh = files[i];
+-      const name = fh.fileName || fh.name || String(fh);
+-      if (!/\.(jpe?g|png|gif|bmp)$/i.test(name)) continue;
+-      const extracted = extractor.extractFiles([name]);
+-      const data = (extracted && extracted.files && extracted.files[0] && extracted.files[0].extraction) || extracted[0].extraction;
+-      const blob = new Blob([data.buffer || data], { type: /\.png$/i.test(name) ? 'image/png' : 'image/jpeg' });
+-      out.push({ name, blob });
+-      if (onProgress) onProgress(out.length-1, files.length);
+-    }
+-    if (!out.length) throw new Error('No images in RAR');
+-    return out;
+-  }
+-
+-  if (extractor.extract){
+-    const res = extractor.extract();
+-    const out = [];
+-    for (const f of res.files || []){
+-      const name = f.fileName || f.name;
+-      if (!/\.(jpe?g|png|gif|bmp)$/i.test(name)) continue;
+-      const data = f.extraction || f.fileData;
+-      const blob = new Blob([data.buffer || data], { type: /\.png$/i.test(name) ? 'image/png' : 'image/jpeg' });
+-      out.push({ name, blob });
+-    }
+-    if (!out.length) throw new Error('No images in RAR');
+-    return out;
+-  }
+ 
+-  throw new Error('Could not extract RAR with unrar-js');
++  return { files: entries.map(e => ({ name: e.name })), cache };
+ }
+diff --git a/src/world/StageScene.js b/src/world/StageScene.js
+deleted file mode 100644
+index fb41ef0..0000000
+--- a/src/world/StageScene.js
++++ /dev/null
+@@ -1,25 +0,0 @@
+-export default function StageScene({ container, appState }){
+-  let mounted = false;
+-  let overlay = null;
+-  return {
+-    async enter(payload){
+-      mounted = true;
+-      const path = (payload && payload.stagePath) || '/stages/stage1-boot.html';
+-      overlay = document.createElement('div');
+-      overlay.style.position = 'fixed'; overlay.style.inset = '0'; overlay.style.background = '#000'; overlay.style.zIndex = '100';
+-      overlay.innerHTML = `
+-        <div style="position:absolute; inset:12px;">
+-          <iframe src="${path}" style="width:100%; height:100%; border:0; background:#000;" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+-        </div>
+-        <div style="position:fixed; right:14px; top:14px; z-index:110;">
+-          <button id="stage-close" style="padding:8px 12px;">Close</button>
+-        </div>`;
+-      container.appendChild(overlay);
+-      overlay.querySelector('#stage-close').addEventListener('click', ()=> appState.go('TOWN'));
+-    },
+-    async exit(){
+-      mounted = false;
+-      if (overlay){ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); overlay = null; }
+-    }
+-  };
+-}
+diff --git a/src/world/TownScene.js b/src/world/TownScene.js
+index 88c92d2..4a9f10e 100644
+--- a/src/world/TownScene.js
++++ b/src/world/TownScene.js
+@@ -33,23 +33,53 @@ export default function TownScene({ scene, camera, container, appState }){
+       const uploadBtn = document.createElement('button'); uploadBtn.textContent = 'Upload';
+       const altBtn = document.createElement('button'); altBtn.textContent = 'Select any file'; altBtn.title = 'Use this if your device does not show .cbr/.rar in the picker';
+       const mockBtn = document.createElement('button'); mockBtn.textContent = 'Mock Add';
+-      // Stage nav buttons
+-      const stage1 = document.createElement('button'); stage1.textContent = 'Stage 1';
+-      const stage2 = document.createElement('button'); stage2.textContent = 'Stage 2';
+-      const stage3 = document.createElement('button'); stage3.textContent = 'Stage 3';
+-      const stage4 = document.createElement('button'); stage4.textContent = 'Stage 4';
+-      const stage5 = document.createElement('button'); stage5.textContent = 'Stage 5';
+       hudControls.appendChild(uploadBtn); hudControls.appendChild(altBtn); hudControls.appendChild(mockBtn);
+-      hudControls.appendChild(stage1); hudControls.appendChild(stage2); hudControls.appendChild(stage3); hudControls.appendChild(stage4); hudControls.appendChild(stage5);
+       document.body.appendChild(input);
+       document.body.appendChild(inputAny);
+ 
++      // Legacy per-stage demo pages, kept for reference in public/stages/.
++      // Only shown when explicitly requested (?debug=1) — these are
++      // developer scaffolding, not part of the real app's navigation.
++      const debugMode = new URLSearchParams(window.location.search).has('debug');
++      if (debugMode){
++        const stageLabels = ['Stage 1', 'Stage 2', 'Stage 3', 'Stage 4', 'Stage 5'];
++        stageLabels.forEach((label, i) => {
++          const btn = document.createElement('button');
++          btn.textContent = label;
++          btn.addEventListener('click', () => window.open(`/stages/stage${i+1}-${['boot','town-static','town-dynamic','cover-analysis','enter-reader'][i]}.html`, '_blank'));
++          hudControls.appendChild(btn);
++        });
++      }
++
+       uploadBtn.addEventListener('click', ()=> input.click());
+       altBtn.addEventListener('click', ()=> inputAny.click());
+       const onInputChange = async (e)=>{ await processFile(e.target.files && e.target.files[0]); };
+       input.addEventListener('change', onInputChange);
+       inputAny.addEventListener('change', onInputChange);
+ 
++      // Show a small help dialog explaining RAR/CBR limitations and conversion options
++      function showRarHelp(filename){
++        function makeLink(href, text){ return `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`; }
++        const existing = document.getElementById('hogarth-rar-help');
++        if (existing) return;
++        const el = document.createElement('div'); el.id = 'hogarth-rar-help';
++        el.style.position = 'fixed'; el.style.left='50%'; el.style.top='18%'; el.style.transform='translateX(-50%)'; el.style.zIndex='120';
++        el.style.background='rgba(20,16,28,0.98)'; el.style.color='#f0ece2'; el.style.border='1px solid rgba(240,236,226,0.2)'; el.style.padding='14px'; el.style.maxWidth='560px'; el.style.fontFamily='IBM Plex Mono, monospace'; el.style.fontSize='13px'; el.style.boxShadow='0 6px 18px rgba(0,0,0,0.6)';
++        const fname = filename ? ` "${filename}"` : '';
++        el.innerHTML = `
++          <div style="margin-bottom:8px; font-weight:600;">CBR (RAR) not supported</div>
++          <div style="margin-bottom:8px; color:rgba(240,236,226,0.9)">The file${fname} appears to be a RAR archive. RAR decoding isn't available in this build. Convert to CBZ (ZIP) or upload from a desktop.</div>
++          <div style="margin-bottom:8px">Try one of these options:</div>
++          <ul style="margin:0 0 10px 18px; color:rgba(240,236,226,0.85)">
++            <li>Use an online converter: ${makeLink('https://convertio.co/rar-zip/','Convert RAR → ZIP')}</li>
++            <li>On desktop: rename/move to a computer and create a ZIP (.cbz)</li>
++          </ul>
++          <div style="text-align:right"><button id="hogarth-rar-close" style="padding:6px 10px">OK</button></div>
++        `;
++        document.body.appendChild(el);
++        el.querySelector('#hogarth-rar-close').addEventListener('click', ()=>{ if (el.parentNode) el.parentNode.removeChild(el); });
++      }
++
+       async function processFile(f){
+         if (!f) return;
+         // If this looks like an archive, try decode path
+@@ -85,13 +115,6 @@ export default function TownScene({ scene, camera, container, appState }){
+       // mock button handler
+       mockBtn.addEventListener('click', ()=>{ const title = `Mock #${town.plots.length+1}`; town.addPlot(title, makePlaceholderCoverCanvas('#8dd6ff')); updateHud(); });
+ 
+-      // stage navigation handlers (open legacy stage HTML inside SPA)
+-      stage1.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage1-boot.html' }));
+-      stage2.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage2-town-static.html' }));
+-      stage3.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage3-town-dynamic.html' }));
+-      stage4.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage4-cover-analysis.html' }));
+-      stage5.addEventListener('click', ()=> appState.go('STAGE', { stagePath: '/stages/stage5-enter-reader.html' }));
+-
+       // hover + click handling
+       const raycaster = new THREE.Raycaster();
+       const mouse = new THREE.Vector2();
+@@ -123,28 +146,6 @@ export default function TownScene({ scene, camera, container, appState }){
+       };
+       updateHud();
+     },
+-    // Show a small help dialog explaining RAR/CBR limitations and conversion options
+-    showRarHelp(filename){
+-      function makeLink(href, text){ return `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`; }
+-      const existing = document.getElementById('hogarth-rar-help');
+-      if (existing) return;
+-      const el = document.createElement('div'); el.id = 'hogarth-rar-help';
+-      el.style.position = 'fixed'; el.style.left='50%'; el.style.top='18%'; el.style.transform='translateX(-50%)'; el.style.zIndex='120';
+-      el.style.background='rgba(20,16,28,0.98)'; el.style.color='#f0ece2'; el.style.border='1px solid rgba(240,236,226,0.2)'; el.style.padding='14px'; el.style.maxWidth='560px'; el.style.fontFamily='IBM Plex Mono, monospace'; el.style.fontSize='13px'; el.style.boxShadow='0 6px 18px rgba(0,0,0,0.6)';
+-      const fname = filename ? ` "${filename}"` : '';
+-      el.innerHTML = `
+-        <div style="margin-bottom:8px; font-weight:600;">CBR (RAR) not supported</div>
+-        <div style="margin-bottom:8px; color:rgba(240,236,226,0.9)">The file${fname} appears to be a RAR archive. RAR decoding isn't available in this build. Convert to CBZ (ZIP) or upload from a desktop.</div>
+-        <div style="margin-bottom:8px">Try one of these options:</div>
+-        <ul style="margin:0 0 10px 18px; color:rgba(240,236,226,0.85)">
+-          <li>Use an online converter: ${makeLink('https://convertio.co/rar-zip/','Convert RAR → ZIP')}</li>
+-          <li>On desktop: rename/move to a computer and create a ZIP (.cbz)</li>
+-        </ul>
+-        <div style="text-align:right"><button id="hogarth-rar-close" style="padding:6px 10px">OK</button></div>
+-      `;
+-      document.body.appendChild(el);
+-      el.querySelector('#hogarth-rar-close').addEventListener('click', ()=>{ if (el.parentNode) el.parentNode.removeChild(el); });
+-    },
+     async exit(){
+       mounted = false;
+       if (this._cleanup) { try { this._cleanup(); } catch(e){} this._cleanup = null; }
+diff --git a/src/world/textures.js b/src/world/textures.js
+index e38f159..c588cf1 100644
+--- a/src/world/textures.js
++++ b/src/world/textures.js
+@@ -41,3 +41,84 @@ export function makePlaceholderCoverCanvas(baseHex){
+   for (let y=0;y<size;y++){ for (let x=0;x<size;x++){ const i=(y*size+x)*4; const n = Math.sin(x*0.8+y*0.5)+Math.sin((x-y)*0.6); const f = 0.75 + n*0.12; img.data[i]=Math.min(255,br*f); img.data[i+1]=Math.min(255,bg*f); img.data[i+2]=Math.min(255,bb*f); img.data[i+3]=255; }}
+   ctx.putImageData(img,0,0); return canvas;
+ }
++
++// ---- boot-sequence textures (ported from the stage1-boot.html prototype) ----
++
++export function makePlanetTexture(kind){
++  const size = 40;
++  const canvas = document.createElement('canvas'); canvas.width = size; canvas.height = size;
++  const ctx = canvas.getContext('2d');
++  const img = ctx.createImageData(size, size);
++  const cx = size/2, cy = size/2, r = size/2 - 1;
++  const palettes = {
++    rock: ['#6b6373', '#847c8f', '#4d4757', '#a89fb0', '#38333f'],
++    lava: ['#2a1210', '#4a1a12', '#7a2814', '#c94a1a', '#f2812e']
++  };
++  const pal = palettes[kind];
++  for (let y=0;y<size;y++){
++    for (let x=0;x<size;x++){
++      const dx=x-cx, dy=y-cy, dist=Math.sqrt(dx*dx+dy*dy);
++      const i=(y*size+x)*4;
++      if (dist > r){ img.data[i+3]=0; continue; }
++      const lightAmt = Math.max(0, (-dx-dy)/size);
++      let colorIdx;
++      if (kind==='rock'){
++        const n = Math.sin(x*0.9)*Math.cos(y*0.7)+Math.sin((x+y)*0.35);
++        colorIdx = Math.min(pal.length-1, Math.max(0, Math.round(2 - lightAmt*3 + n*0.6)));
++      } else {
++        const n = Math.sin(x*0.5+y*0.9)+Math.sin(x*1.3-y*0.4);
++        colorIdx = Math.min(pal.length-1, Math.max(0, Math.round(1.5 + n*1.4 + lightAmt*1.2)));
++      }
++      const [rr,gg,bb] = hexToInts(pal[colorIdx]);
++      img.data[i]=rr; img.data[i+1]=gg; img.data[i+2]=bb; img.data[i+3]=255;
++    }
++  }
++  ctx.putImageData(img,0,0);
++  return canvas;
++}
++
++export function makeFlashTexture(){
++  const size = 24;
++  const canvas = document.createElement('canvas'); canvas.width=size; canvas.height=size;
++  const ctx = canvas.getContext('2d');
++  const img = ctx.createImageData(size,size);
++  const cx=size/2, cy=size/2, r=size/2-1;
++  for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
++    const dist=Math.hypot(x-cx,y-cy); const i=(y*size+x)*4;
++    if (dist>r){ img.data[i+3]=0; continue; }
++    const ring = dist/r;
++    const hex = ring<0.55 ? '#fff6dd' : (ring<0.8 ? '#ffcf6b' : '#f2812e');
++    const [rr,gg,bb] = hexToInts(hex);
++    img.data[i]=rr; img.data[i+1]=gg; img.data[i+2]=bb; img.data[i+3]=255;
++  }}
++  ctx.putImageData(img,0,0);
++  return canvas;
++}
++
++export function makeParticleTexture(hex){
++  const size = 6;
++  const canvas = document.createElement('canvas'); canvas.width=size; canvas.height=size;
++  const ctx = canvas.getContext('2d');
++  ctx.fillStyle = hex; ctx.fillRect(0,0,size,size);
++  return canvas;
++}
++
++// Samples opaque pixel colors out of a generated texture canvas — used so
++// boot-sequence debris is colored from the planets' own palettes instead of
++// a generic spark color.
++export function sampleOpaqueColors(sourceCanvas, size, count){
++  const ctx = sourceCanvas.getContext('2d');
++  const data = ctx.getImageData(0,0,size,size).data;
++  const colors = [];
++  let attempts = 0;
++  while (colors.length < count && attempts < count*20){
++    attempts++;
++    const x = Math.floor(Math.random()*size), y = Math.floor(Math.random()*size);
++    const i = (y*size+x)*4;
++    if (data[i+3] > 200){
++      colors.push(`#${data[i].toString(16).padStart(2,'0')}${data[i+1].toString(16).padStart(2,'0')}${data[i+2].toString(16).padStart(2,'0')}`);
++    }
++  }
++  return colors.length ? colors : ['#c94a1a'];
++}
++
+diff --git a/stages/stage2-town-static.html b/stages/stage2-town-static.html
+deleted file mode 100644
+index ccdd2c0..0000000
+--- a/stages/stage2-town-static.html
++++ /dev/null
+@@ -1,326 +0,0 @@
+-<!DOCTYPE html>
+-<html lang="en">
+-<head>
+-<meta charset="UTF-8">
+-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+-<title>Hogarth — Town Map (Stage 2, Static)</title>
+-<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+-<style>
+-  html,body{margin:0; padding:0; background:#0c0a12; overflow:hidden; height:100%; width:100%;}
+-  #stage{position:fixed; inset:0;}
+-  #stage canvas{
+-    display:block; width:100%; height:100%;
+-    image-rendering:pixelated; image-rendering:-moz-crisp-edges; image-rendering:crisp-edges;
+-  }
+-  #hud{
+-    position:fixed; top:20px; left:20px; z-index:20;
+-    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.08em;
+-    text-transform:uppercase; color:rgba(240,236,226,0.65);
+-  }
+-  #hud .dim{opacity:0.5;}
+-  #tooltip{
+-    position:fixed; z-index:30; pointer-events:none;
+-    font-family:'IBM Plex Mono', monospace; font-size:11px;
+-    background:rgba(10,8,16,0.85); color:#f0ece2; border:1px solid rgba(240,236,226,0.25);
+-    padding:6px 10px; opacity:0; transition:opacity 0.15s ease; white-space:nowrap;
+-  }
+-</style>
+-</head>
+-<body>
+-
+-<div id="stage"></div>
+-<div id="hud">HOGARTH <span class="dim">/ town — 6 plots, 0 lit</span></div>
+-<div id="tooltip"></div>
+-
+-<script>
+-(function(){
+-  const stageEl = document.getElementById('stage');
+-  const tooltip = document.getElementById('tooltip');
+-  const hud = document.getElementById('hud');
+-
+-  // ---------- shared pixel helpers (same technique as boot sequence) ----------
+-  function hexToInts(hex){
+-    return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
+-  }
+-  function makeNearestTexture(canvas, repeatX, repeatY){
+-    const tex = new THREE.CanvasTexture(canvas);
+-    tex.magFilter = THREE.NearestFilter;
+-    tex.minFilter = THREE.NearestFilter;
+-    if (repeatX || repeatY){
+-      tex.wrapS = THREE.RepeatWrapping;
+-      tex.wrapT = THREE.RepeatWrapping;
+-      tex.repeat.set(repeatX||1, repeatY||1);
+-    }
+-    return tex;
+-  }
+-
+-  // tileable grass/dirt ground texture
+-  function makeGroundTexture(){
+-    const size = 16;
+-    const canvas = document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx = canvas.getContext('2d');
+-    const img = ctx.createImageData(size,size);
+-    const base = ['#3c5a3e', '#456647', '#345036', '#4d6f4f'];
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const n = Math.sin(x*1.7)*Math.cos(y*1.3) + Math.sin((x+y)*0.9);
+-      const idx = Math.min(base.length-1, Math.max(0, Math.round((n+1.4)/0.9)));
+-      const [r,g,b] = hexToInts(base[idx]);
+-      const i=(y*size+x)*4;
+-      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0);
+-    return canvas;
+-  }
+-
+-  function makeStreetTexture(){
+-    const size = 16;
+-    const canvas = document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx = canvas.getContext('2d');
+-    const img = ctx.createImageData(size,size);
+-    const base = ['#5a5560', '#65606c', '#4d4954'];
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const n = Math.sin(x*2.1+y*0.4);
+-      const idx = Math.min(base.length-1, Math.max(0, Math.round((n+1)/0.9)));
+-      const [r,g,b] = hexToInts(base[idx]);
+-      const i=(y*size+x)*4;
+-      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0);
+-    return canvas;
+-  }
+-
+-  // small building facade texture, color-varied per plot
+-  function makeBuildingTexture(baseHex, accentHex){
+-    const size = 16;
+-    const canvas = document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx = canvas.getContext('2d');
+-    const img = ctx.createImageData(size,size);
+-    const [br,bg,bb] = hexToInts(baseHex);
+-    const [ar,ag,ab] = hexToInts(accentHex);
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const i=(y*size+x)*4;
+-      const isDoor = x>=6 && x<=9 && y>=9;
+-      const isWindow = (x===3||x===12) && y>=3 && y<=6;
+-      const brickLine = (y%4===0);
+-      let r=br,g=bg,b=bb;
+-      if (isDoor){ r=30; g=22; b=18; }
+-      else if (isWindow){ r=ar; g=ag; b=ab; }
+-      else if (brickLine){ r=Math.max(0,br-18); g=Math.max(0,bg-18); b=Math.max(0,bb-18); }
+-      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0);
+-    return canvas;
+-  }
+-
+-  function makeStarTexture(){
+-    const size=6;
+-    const canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx=canvas.getContext('2d'); ctx.fillStyle='#e8e2f0'; ctx.fillRect(0,0,size,size);
+-    return canvas;
+-  }
+-
+-  // ---------- scene / camera / renderer ----------
+-  const PIXEL_SCALE = 1/6;
+-  const scene = new THREE.Scene();
+-  scene.background = new THREE.Color(0x14101c);
+-  scene.fog = new THREE.Fog(0x14101c, 22, 40);
+-
+-  const aspect = window.innerWidth/window.innerHeight;
+-  const viewSize = 13;
+-  const camera = new THREE.OrthographicCamera(
+-    -viewSize*aspect, viewSize*aspect, viewSize, -viewSize, 0.1, 100
+-  );
+-  camera.position.set(16, 14, 16);
+-  camera.lookAt(0, 0, 0);
+-
+-  const renderer = new THREE.WebGLRenderer({ antialias:false });
+-  renderer.setPixelRatio(1);
+-  stageEl.appendChild(renderer.domElement);
+-
+-  function resize(){
+-    const w = Math.max(64, Math.floor(window.innerWidth * PIXEL_SCALE));
+-    const h = Math.max(48, Math.floor(window.innerHeight * PIXEL_SCALE));
+-    renderer.setSize(w, h, false);
+-    const a = window.innerWidth/window.innerHeight;
+-    camera.left = -viewSize*a; camera.right = viewSize*a;
+-    camera.top = viewSize; camera.bottom = -viewSize;
+-    camera.updateProjectionMatrix();
+-  }
+-  resize();
+-  window.addEventListener('resize', resize);
+-
+-  // ---------- lighting ----------
+-  scene.add(new THREE.AmbientLight(0x2e2a3c, 1.2));
+-  const moon = new THREE.DirectionalLight(0xcfd0ff, 0.75);
+-  moon.position.set(-8, 12, 6);
+-  scene.add(moon);
+-  const warmFill = new THREE.PointLight(0x6a4fd9, 0.4, 30);
+-  warmFill.position.set(6, 4, -6);
+-  scene.add(warmFill);
+-
+-  // ---------- ground ----------
+-  const groundTex = makeNearestTexture(makeGroundTexture(), 10, 10);
+-  const ground = new THREE.Mesh(
+-    new THREE.PlaneGeometry(24, 24),
+-    new THREE.MeshStandardMaterial({ map: groundTex, roughness:1 })
+-  );
+-  ground.rotation.x = -Math.PI/2;
+-  scene.add(ground);
+-
+-  // main street, straight down the middle (Z axis)
+-  const streetTex = makeNearestTexture(makeStreetTexture(), 2, 12);
+-  const street = new THREE.Mesh(
+-    new THREE.PlaneGeometry(3, 22),
+-    new THREE.MeshStandardMaterial({ map: streetTex, roughness:1 })
+-  );
+-  street.rotation.x = -Math.PI/2;
+-  street.position.y = 0.01;
+-  scene.add(street);
+-
+-  // ---------- plots ----------
+-  const plotPalette = [
+-    ['#8a4a3a', '#f2d98a'], // practice - warm brick
+-    ['#3a5a7a', '#f2d98a'], // history - blue
+-    ['#5a4a7a', '#f2d98a'], // inspiration - purple
+-    ['#4a7a5a', '#f2d98a'], // works - green
+-    ['#7a5a3a', '#f2d98a'], // practice
+-    ['#7a3a5a', '#f2d98a'], // history
+-  ];
+-
+-  const plotGroup = new THREE.Group();
+-  scene.add(plotGroup);
+-
+-  const plots = [];
+-  const zSpacing = 6;
+-  for (let i=0;i<6;i++){
+-    const side = i % 2 === 0 ? -1 : 1; // alternate left/right of street
+-    const row = Math.floor(i/2);
+-    const x = side * 5.5;
+-    const z = -6 + row * zSpacing;
+-
+-    const g = new THREE.Group();
+-    g.position.set(x, 0, z);
+-
+-    // base platform
+-    const base = new THREE.Mesh(
+-      new THREE.BoxGeometry(2.6, 0.15, 2.6),
+-      new THREE.MeshStandardMaterial({ color: 0x2a2634, roughness:1 })
+-    );
+-    base.position.y = 0.075;
+-    g.add(base);
+-
+-    // building
+-    const [baseHex, accentHex] = plotPalette[i];
+-    const facadeTex = makeNearestTexture(makeBuildingTexture(baseHex, accentHex));
+-    const building = new THREE.Mesh(
+-      new THREE.BoxGeometry(1.6, 1.6, 1.6),
+-      new THREE.MeshStandardMaterial({ map: facadeTex, roughness:0.9 })
+-    );
+-    building.position.y = 0.15 + 0.8;
+-    g.add(building);
+-
+-    // pyramid roof
+-    const roof = new THREE.Mesh(
+-      new THREE.ConeGeometry(1.3, 0.9, 4),
+-      new THREE.MeshStandardMaterial({ color: 0x1c1822, roughness:1 })
+-    );
+-    roof.rotation.y = Math.PI/4;
+-    roof.position.y = 0.15 + 1.6 + 0.45;
+-    g.add(roof);
+-
+-    // lamp post, positioned toward the street side of the plot
+-    const lampGroup = new THREE.Group();
+-    lampGroup.position.set(-side * 1.7, 0, 0.9);
+-    const pole = new THREE.Mesh(
+-      new THREE.CylinderGeometry(0.05, 0.06, 1.8, 6),
+-      new THREE.MeshStandardMaterial({ color: 0x1c1822, roughness:0.8 })
+-    );
+-    pole.position.y = 0.9;
+-    lampGroup.add(pole);
+-
+-    const bulbMat = new THREE.MeshStandardMaterial({
+-      color: 0x3a3640, emissive: 0x000000, emissiveIntensity: 0, roughness:0.5
+-    });
+-    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 8), bulbMat);
+-    bulb.position.y = 1.85;
+-    lampGroup.add(bulb);
+-
+-    const glowLight = new THREE.PointLight(0xffcf8a, 0, 4);
+-    glowLight.position.y = 1.85;
+-    lampGroup.add(glowLight);
+-
+-    g.add(lampGroup);
+-
+-    plotGroup.add(g);
+-    plots.push({
+-      group: g, building, roof, bulbMat, glowLight,
+-      lit: false, index: i,
+-      label: `Plot ${i+1} — empty`
+-    });
+-  }
+-
+-  // background stars (reused visual language from boot sequence)
+-  const starGeo = new THREE.BufferGeometry();
+-  const starCount = 120;
+-  const starPos = new Float32Array(starCount*3);
+-  for (let i=0;i<starCount;i++){
+-    starPos[i*3]=(Math.random()-0.5)*50;
+-    starPos[i*3+1]=6+Math.random()*14;
+-    starPos[i*3+2]=(Math.random()-0.5)*50;
+-  }
+-  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos,3));
+-  const starMat = new THREE.PointsMaterial({
+-    size:0.1, map: makeNearestTexture(makeStarTexture()), transparent:true, depthWrite:false
+-  });
+-  scene.add(new THREE.Points(starGeo, starMat));
+-
+-  // ---------- hover interaction (groundwork for stage 5, no reader yet) ----------
+-  const raycaster = new THREE.Raycaster();
+-  const mouse = new THREE.Vector2();
+-  let hovered = null;
+-
+-  function onMove(e){
+-    const rect = renderer.domElement.getBoundingClientRect();
+-    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+-    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+-    tooltip.style.left = (e.clientX + 14) + 'px';
+-    tooltip.style.top = (e.clientY + 14) + 'px';
+-  }
+-  window.addEventListener('mousemove', onMove);
+-  window.addEventListener('click', () => {
+-    if (hovered) console.log('Would open reader for:', hovered.label, '(wired in Stage 5)');
+-  });
+-
+-  function updateHover(){
+-    raycaster.setFromCamera(mouse, camera);
+-    const targets = plots.map(p => p.building);
+-    const hits = raycaster.intersectObjects(targets);
+-    if (hits.length){
+-      const hitPlot = plots.find(p => p.building === hits[0].object);
+-      if (hovered !== hitPlot){
+-        if (hovered) hovered.group.scale.set(1,1,1);
+-        hovered = hitPlot;
+-      }
+-      hovered.group.scale.set(1.05,1.05,1.05);
+-      tooltip.textContent = hovered.label;
+-      tooltip.style.opacity = '1';
+-    } else {
+-      if (hovered) hovered.group.scale.set(1,1,1);
+-      hovered = null;
+-      tooltip.style.opacity = '0';
+-    }
+-  }
+-
+-  // ---------- render loop ----------
+-  function animate(){
+-    requestAnimationFrame(animate);
+-    updateHover();
+-    renderer.render(scene, camera);
+-  }
+-  animate();
+-})();
+-</script>
+-
+-</body>
+-</html>
+diff --git a/stages/stage3-town-dynamic.html b/stages/stage3-town-dynamic.html
+deleted file mode 100644
+index dfd11d8..0000000
+--- a/stages/stage3-town-dynamic.html
++++ /dev/null
+@@ -1,387 +0,0 @@
+-<!DOCTYPE html>
+-<html lang="en">
+-<head>
+-<meta charset="UTF-8">
+-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+-<title>Hogarth — Town Map (Stage 3, Dynamic Placement)</title>
+-<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+-<style>
+-  html,body{margin:0; padding:0; background:#0c0a12; overflow:hidden; height:100%; width:100%;}
+-  #stage{position:fixed; inset:0;}
+-  #stage canvas{
+-    display:block; width:100%; height:100%;
+-    image-rendering:pixelated; image-rendering:-moz-crisp-edges; image-rendering:crisp-edges;
+-  }
+-  #hud{
+-    position:fixed; top:20px; left:20px; z-index:20;
+-    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.08em;
+-    text-transform:uppercase; color:rgba(240,236,226,0.75);
+-    display:flex; flex-direction:column; gap:10px;
+-  }
+-  #hud .title{color:#f0ece2;}
+-  #hud .dim{opacity:0.55;}
+-  #controls{ display:flex; gap:8px; }
+-  #controls button{
+-    font-family:'IBM Plex Mono', monospace; font-size:10px; letter-spacing:0.06em; text-transform:uppercase;
+-    background:rgba(20,16,28,0.7); color:#f0ece2; border:1px solid rgba(240,236,226,0.3);
+-    padding:8px 12px; cursor:pointer;
+-  }
+-  #controls button:hover, #controls button:focus-visible{ background:rgba(240,236,226,0.12); outline:none; }
+-  #tooltip{
+-    position:fixed; z-index:30; pointer-events:none;
+-    font-family:'IBM Plex Mono', monospace; font-size:11px;
+-    background:rgba(10,8,16,0.85); color:#f0ece2; border:1px solid rgba(240,236,226,0.25);
+-    padding:6px 10px; opacity:0; transition:opacity 0.15s ease; white-space:nowrap;
+-  }
+-</style>
+-</head>
+-<body>
+-
+-<div id="stage"></div>
+-<div id="hud">
+-  <div><span class="title">HOGARTH</span> <span class="dim" id="hudCount">/ town — 0 plots, 0 lit</span></div>
+-  <div id="controls">
+-    <button id="addOne" type="button">+ Add comic (mock)</button>
+-    <button id="addSix" type="button">+ Add 6 (fill a row)</button>
+-  </div>
+-</div>
+-<div id="tooltip"></div>
+-
+-<script>
+-(function(){
+-  const stageEl = document.getElementById('stage');
+-  const tooltip = document.getElementById('tooltip');
+-  const hudCount = document.getElementById('hudCount');
+-
+-  // ---------- pixel texture helpers ----------
+-  function hexToInts(hex){
+-    return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
+-  }
+-  function makeNearestTexture(canvas){
+-    const tex = new THREE.CanvasTexture(canvas);
+-    tex.magFilter = THREE.NearestFilter;
+-    tex.minFilter = THREE.NearestFilter;
+-    tex.wrapS = THREE.RepeatWrapping;
+-    tex.wrapT = THREE.RepeatWrapping;
+-    return tex;
+-  }
+-  function hslToHex(h, s, l){
+-    s/=100; l/=100;
+-    const k = n => (n + h/30) % 12;
+-    const a = s * Math.min(l, 1-l);
+-    const f = n => l - a * Math.max(-1, Math.min(k(n)-3, Math.min(9-k(n), 1)));
+-    const toHex = x => Math.round(x*255).toString(16).padStart(2,'0');
+-    return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
+-  }
+-  function hashHue(str){
+-    let h = 0;
+-    for (let i=0;i<str.length;i++) h = (h*31 + str.charCodeAt(i)) >>> 0;
+-    return h % 360;
+-  }
+-
+-  function makeGroundTexture(){
+-    const size = 16;
+-    const canvas = document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx = canvas.getContext('2d');
+-    const img = ctx.createImageData(size,size);
+-    const base = ['#3c5a3e', '#456647', '#345036', '#4d6f4f'];
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const n = Math.sin(x*1.7)*Math.cos(y*1.3) + Math.sin((x+y)*0.9);
+-      const idx = Math.min(base.length-1, Math.max(0, Math.round((n+1.4)/0.9)));
+-      const [r,g,b] = hexToInts(base[idx]);
+-      const i=(y*size+x)*4;
+-      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0);
+-    return canvas;
+-  }
+-  function makeStreetTexture(){
+-    const size = 16;
+-    const canvas = document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx = canvas.getContext('2d');
+-    const img = ctx.createImageData(size,size);
+-    const base = ['#5a5560', '#65606c', '#4d4954'];
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const n = Math.sin(x*2.1+y*0.4);
+-      const idx = Math.min(base.length-1, Math.max(0, Math.round((n+1)/0.9)));
+-      const [r,g,b] = hexToInts(base[idx]);
+-      const i=(y*size+x)*4;
+-      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0);
+-    return canvas;
+-  }
+-  function makeBuildingTexture(baseHex, accentHex){
+-    const size = 16;
+-    const canvas = document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx = canvas.getContext('2d');
+-    const img = ctx.createImageData(size,size);
+-    const [br,bg,bb] = hexToInts(baseHex);
+-    const [ar,ag,ab] = hexToInts(accentHex);
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const i=(y*size+x)*4;
+-      const isDoor = x>=6 && x<=9 && y>=9;
+-      const isWindow = (x===3||x===12) && y>=3 && y<=6;
+-      const brickLine = (y%4===0);
+-      let r=br,g=bg,b=bb;
+-      if (isDoor){ r=30; g=22; b=18; }
+-      else if (isWindow){ r=ar; g=ag; b=ab; }
+-      else if (brickLine){ r=Math.max(0,br-18); g=Math.max(0,bg-18); b=Math.max(0,bb-18); }
+-      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0);
+-    return canvas;
+-  }
+-  function makeStarTexture(){
+-    const size=6;
+-    const canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx=canvas.getContext('2d'); ctx.fillStyle='#e8e2f0'; ctx.fillRect(0,0,size,size);
+-    return canvas;
+-  }
+-
+-  // ---------- scene / camera / renderer ----------
+-  const PIXEL_SCALE = 1/6;
+-  const scene = new THREE.Scene();
+-  scene.background = new THREE.Color(0x14101c);
+-  scene.fog = new THREE.Fog(0x14101c, 24, 46);
+-
+-  const camera = new THREE.OrthographicCamera(-1,1,1,-1,0.1,200);
+-  const renderer = new THREE.WebGLRenderer({ antialias:false });
+-  renderer.setPixelRatio(1);
+-  stageEl.appendChild(renderer.domElement);
+-
+-  function resizeRenderer(){
+-    const w = Math.max(64, Math.floor(window.innerWidth * PIXEL_SCALE));
+-    const h = Math.max(48, Math.floor(window.innerHeight * PIXEL_SCALE));
+-    renderer.setSize(w, h, false);
+-  }
+-  window.addEventListener('resize', () => { resizeRenderer(); updateCameraFit(); });
+-  resizeRenderer();
+-
+-  scene.add(new THREE.AmbientLight(0x2e2a3c, 1.2));
+-  const moon = new THREE.DirectionalLight(0xcfd0ff, 0.75);
+-  moon.position.set(-8, 12, 6);
+-  scene.add(moon);
+-  const warmFill = new THREE.PointLight(0x6a4fd9, 0.4, 30);
+-  warmFill.position.set(6, 4, -6);
+-  scene.add(warmFill);
+-
+-  const groundTexBase = makeGroundTexture();
+-  const streetTexBase = makeStreetTexture();
+-  const groundMat = new THREE.MeshStandardMaterial({ map: makeNearestTexture(groundTexBase), roughness:1 });
+-  const streetMat = new THREE.MeshStandardMaterial({ map: makeNearestTexture(streetTexBase), roughness:1 });
+-
+-  let groundMesh = null, streetMesh = null;
+-  const zSpacing = 6;
+-  const rowStartZ = -6;
+-
+-  function rebuildGroundAndStreet(rows){
+-    if (groundMesh){ scene.remove(groundMesh); groundMesh.geometry.dispose(); }
+-    if (streetMesh){ scene.remove(streetMesh); streetMesh.geometry.dispose(); }
+-    const minZ = rowStartZ - 5;
+-    const maxZ = rowStartZ + (rows-1)*zSpacing + 5;
+-    const length = maxZ - minZ;
+-    const centerZ = (minZ + maxZ) / 2;
+-
+-    groundMat.map.repeat.set(10, length/2.4);
+-    streetMat.map.repeat.set(2, length/1.83);
+-
+-    groundMesh = new THREE.Mesh(new THREE.PlaneGeometry(24, length), groundMat);
+-    groundMesh.rotation.x = -Math.PI/2;
+-    groundMesh.position.z = centerZ;
+-    scene.add(groundMesh);
+-
+-    streetMesh = new THREE.Mesh(new THREE.PlaneGeometry(3, length), streetMat);
+-    streetMesh.rotation.x = -Math.PI/2;
+-    streetMesh.position.y = 0.01;
+-    streetMesh.position.z = centerZ;
+-    scene.add(streetMesh);
+-  }
+-
+-  let builtRows = 0;
+-  function updateCameraFit(){
+-    const rows = Math.max(1, builtRows);
+-    const midZ = rowStartZ + (rows-1) * (zSpacing/2);
+-    const vs = 11 + rows * 2.0;
+-    const a = window.innerWidth / window.innerHeight;
+-    camera.left = -vs*a; camera.right = vs*a; camera.top = vs; camera.bottom = -vs;
+-    const dist = 15 + rows * 2.0;
+-    camera.position.set(dist, dist*0.875, dist*0.6 + midZ);
+-    camera.lookAt(0, 0, midZ);
+-    camera.updateProjectionMatrix();
+-  }
+-
+-  // ---------- plots ----------
+-  const plotGroup = new THREE.Group();
+-  scene.add(plotGroup);
+-  const plots = [];
+-
+-  function computeSlotPosition(n){
+-    const side = n % 2 === 0 ? -1 : 1;
+-    const row = Math.floor(n/2);
+-    return { x: side*5.5, z: rowStartZ + row*zSpacing, row, side };
+-  }
+-
+-  function createPlot(index, title, baseHex, accentHex){
+-    const { x, z, side } = computeSlotPosition(index);
+-    const g = new THREE.Group();
+-    g.position.set(x, 0, z);
+-
+-    const base = new THREE.Mesh(
+-      new THREE.BoxGeometry(2.6, 0.15, 2.6),
+-      new THREE.MeshStandardMaterial({ color: 0x2a2634, roughness:1 })
+-    );
+-    base.position.y = 0.075;
+-    g.add(base);
+-
+-    const facadeTex = makeNearestTexture(makeBuildingTexture(baseHex, accentHex));
+-    const building = new THREE.Mesh(
+-      new THREE.BoxGeometry(1.6, 1.6, 1.6),
+-      new THREE.MeshStandardMaterial({ map: facadeTex, roughness:0.9 })
+-    );
+-    building.position.y = 0.15 + 0.8;
+-    g.add(building);
+-
+-    const roof = new THREE.Mesh(
+-      new THREE.ConeGeometry(1.3, 0.9, 4),
+-      new THREE.MeshStandardMaterial({ color: 0x1c1822, roughness:1 })
+-    );
+-    roof.rotation.y = Math.PI/4;
+-    roof.position.y = 0.15 + 1.6 + 0.45;
+-    g.add(roof);
+-
+-    const lampGroup = new THREE.Group();
+-    lampGroup.position.set(-side*1.7, 0, 0.9);
+-    const pole = new THREE.Mesh(
+-      new THREE.CylinderGeometry(0.05, 0.06, 1.8, 6),
+-      new THREE.MeshStandardMaterial({ color: 0x1c1822, roughness:0.8 })
+-    );
+-    pole.position.y = 0.9;
+-    lampGroup.add(pole);
+-
+-    const bulbMat = new THREE.MeshStandardMaterial({
+-      color: 0x3a3640, emissive: 0x000000, emissiveIntensity: 0, roughness:0.5
+-    });
+-    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 8), bulbMat);
+-    bulb.position.y = 1.85;
+-    lampGroup.add(bulb);
+-
+-    const glowLight = new THREE.PointLight(0xffcf8a, 0, 4);
+-    glowLight.position.y = 1.85;
+-    lampGroup.add(glowLight);
+-    g.add(lampGroup);
+-
+-    plotGroup.add(g);
+-    return { group: g, building, roof, bulbMat, glowLight, lit:false, index, label: title };
+-  }
+-
+-  // ---------- add-comic flow (mock — Stage 4 replaces the lighting logic) ----------
+-  const mockTitles = ['Untitled Draft', 'Working Copy', 'No Cover Yet', 'Placeholder Vol.', 'Draft Pages', 'Scan Batch'];
+-  let mockCounter = 0;
+-  function pickMockTitle(){
+-    mockCounter++;
+-    return `${mockTitles[(mockCounter-1) % mockTitles.length]} #${mockCounter}`;
+-  }
+-
+-  function addComic(title){
+-    const n = plots.length;
+-    const rowsNeeded = Math.floor(n/2) + 1;
+-    if (rowsNeeded > builtRows){
+-      builtRows = rowsNeeded;
+-      rebuildGroundAndStreet(builtRows);
+-    }
+-    const hue = hashHue(title);
+-    const baseHex = hslToHex(hue, 42, 38);
+-    const accentHex = hslToHex((hue+40)%360, 55, 74);
+-    const plot = createPlot(n, title, baseHex, accentHex);
+-
+-    // Stand-in only: lights immediately on placement to confirm the
+-    // plot exists. Stage 4 replaces this with lighting driven by
+-    // actual cover-image analysis (and likely a color pulled from
+-    // the cover instead of a fixed warm tone).
+-    plot.bulbMat.emissive.setHex(0xffcf8a);
+-    plot.bulbMat.emissiveIntensity = 1;
+-    plot.glowLight.intensity = 1.1;
+-    plot.lit = true;
+-
+-    plots.push(plot);
+-    updateCameraFit();
+-    updateHud();
+-  }
+-
+-  function updateHud(){
+-    const lit = plots.filter(p => p.lit).length;
+-    hudCount.textContent = `/ town — ${plots.length} plot${plots.length===1?'':'s'}, ${lit} lit`;
+-  }
+-
+-  document.getElementById('addOne').addEventListener('click', () => addComic(pickMockTitle()));
+-  document.getElementById('addSix').addEventListener('click', () => {
+-    for (let i=0;i<6;i++) addComic(pickMockTitle());
+-  });
+-
+-  // seed with one row so the town isn't empty on load
+-  for (let i=0;i<2;i++) addComic(pickMockTitle());
+-
+-  // stars
+-  const starGeo = new THREE.BufferGeometry();
+-  const starCount = 160;
+-  const starPos = new Float32Array(starCount*3);
+-  for (let i=0;i<starCount;i++){
+-    starPos[i*3]=(Math.random()-0.5)*70;
+-    starPos[i*3+1]=6+Math.random()*16;
+-    starPos[i*3+2]=(Math.random()-0.5)*70;
+-  }
+-  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos,3));
+-  const starMat = new THREE.PointsMaterial({
+-    size:0.1, map: makeNearestTexture(makeStarTexture()), transparent:true, depthWrite:false
+-  });
+-  scene.add(new THREE.Points(starGeo, starMat));
+-
+-  // ---------- hover / click ----------
+-  const raycaster = new THREE.Raycaster();
+-  const mouse = new THREE.Vector2();
+-  let hovered = null;
+-
+-  window.addEventListener('mousemove', (e) => {
+-    const rect = renderer.domElement.getBoundingClientRect();
+-    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+-    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+-    tooltip.style.left = (e.clientX + 14) + 'px';
+-    tooltip.style.top = (e.clientY + 14) + 'px';
+-  });
+-  window.addEventListener('click', (e) => {
+-    if (e.target.closest('#hud')) return;
+-    if (hovered) console.log('Would open reader for:', hovered.label, '(wired in Stage 5)');
+-  });
+-
+-  function updateHover(){
+-    raycaster.setFromCamera(mouse, camera);
+-    const hits = raycaster.intersectObjects(plots.map(p => p.building));
+-    if (hits.length){
+-      const hitPlot = plots.find(p => p.building === hits[0].object);
+-      if (hovered !== hitPlot){
+-        if (hovered) hovered.group.scale.set(1,1,1);
+-        hovered = hitPlot;
+-      }
+-      hovered.group.scale.set(1.05,1.05,1.05);
+-      tooltip.textContent = hovered.label;
+-      tooltip.style.opacity = '1';
+-    } else {
+-      if (hovered) hovered.group.scale.set(1,1,1);
+-      hovered = null;
+-      tooltip.style.opacity = '0';
+-    }
+-  }
+-
+-  function animate(){
+-    requestAnimationFrame(animate);
+-    updateHover();
+-    renderer.render(scene, camera);
+-  }
+-  animate();
+-})();
+-</script>
+-
+-</body>
+-</html>
+diff --git a/stages/stage4-cover-analysis.html b/stages/stage4-cover-analysis.html
+deleted file mode 100644
+index 2d4b1b7..0000000
+--- a/stages/stage4-cover-analysis.html
++++ /dev/null
+@@ -1,473 +0,0 @@
+-<!DOCTYPE html>
+-<html lang="en">
+-<head>
+-<meta charset="UTF-8">
+-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+-<title>Hogarth — Town Map (Stage 4, Cover Analysis)</title>
+-<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+-<style>
+-  html,body{margin:0; padding:0; background:#0c0a12; overflow:hidden; height:100%; width:100%;}
+-  #stage{position:fixed; inset:0;}
+-  #stage canvas{
+-    display:block; width:100%; height:100%;
+-    image-rendering:pixelated; image-rendering:-moz-crisp-edges; image-rendering:crisp-edges;
+-  }
+-  #hud{
+-    position:fixed; top:20px; left:20px; z-index:20;
+-    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.08em;
+-    text-transform:uppercase; color:rgba(240,236,226,0.75);
+-    display:flex; flex-direction:column; gap:10px; max-width:280px;
+-  }
+-  #hud .title{color:#f0ece2;}
+-  #hud .dim{opacity:0.55;}
+-  #controls{ display:flex; flex-wrap:wrap; gap:8px; }
+-  #controls button, #controls label{
+-    font-family:'IBM Plex Mono', monospace; font-size:10px; letter-spacing:0.06em; text-transform:uppercase;
+-    background:rgba(20,16,28,0.7); color:#f0ece2; border:1px solid rgba(240,236,226,0.3);
+-    padding:8px 12px; cursor:pointer; display:inline-block;
+-  }
+-  #controls button:hover, #controls label:hover{ background:rgba(240,236,226,0.12); }
+-  #fileInput{ display:none; }
+-  #status{ font-size:10px; color:#ffcf8a; min-height:14px; opacity:0; transition:opacity 0.3s ease; }
+-  #tooltip{
+-    position:fixed; z-index:30; pointer-events:none;
+-    font-family:'IBM Plex Mono', monospace; font-size:11px;
+-    background:rgba(10,8,16,0.85); color:#f0ece2; border:1px solid rgba(240,236,226,0.25);
+-    padding:6px 10px; opacity:0; transition:opacity 0.15s ease; white-space:nowrap;
+-  }
+-</style>
+-</head>
+-<body>
+-
+-<div id="stage"></div>
+-<div id="hud">
+-  <div><span class="title">HOGARTH</span> <span class="dim" id="hudCount">/ town — 0 plots, 0 lit</span></div>
+-  <div id="controls">
+-    <label for="fileInput">Upload cover(s)</label>
+-    <input id="fileInput" type="file" accept="image/*" multiple>
+-    <button id="addMock" type="button">+ Add mock (no cover)</button>
+-  </div>
+-  <div id="status"></div>
+-</div>
+-<div id="tooltip"></div>
+-
+-<script>
+-(function(){
+-  const stageEl = document.getElementById('stage');
+-  const tooltip = document.getElementById('tooltip');
+-  const hudCount = document.getElementById('hudCount');
+-  const statusEl = document.getElementById('status');
+-
+-  function showStatus(msg){
+-    statusEl.textContent = msg;
+-    statusEl.style.opacity = '1';
+-    clearTimeout(showStatus._t);
+-    showStatus._t = setTimeout(() => { statusEl.style.opacity = '0'; }, 1800);
+-  }
+-
+-  // ---------- color helpers ----------
+-  function hexToInts(hex){
+-    return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
+-  }
+-  function rgbToHex(r,g,b){
+-    const h = v => Math.max(0,Math.min(255,Math.round(v))).toString(16).padStart(2,'0');
+-    return `#${h(r)}${h(g)}${h(b)}`;
+-  }
+-  function rgbToHsl(r,g,b){
+-    r/=255; g/=255; b/=255;
+-    const max=Math.max(r,g,b), min=Math.min(r,g,b);
+-    let h,s,l=(max+min)/2;
+-    if (max===min){ h=0; s=0; }
+-    else{
+-      const d=max-min;
+-      s = l>0.5 ? d/(2-max-min) : d/(max+min);
+-      switch(max){
+-        case r: h=(g-b)/d + (g<b?6:0); break;
+-        case g: h=(b-r)/d + 2; break;
+-        case b: h=(r-g)/d + 4; break;
+-      }
+-      h*=60;
+-    }
+-    return [h,s,l];
+-  }
+-  function hslToHex(h, s, l){
+-    s/=100; l/=100;
+-    const k = n => (n + h/30) % 12;
+-    const a = s * Math.min(l, 1-l);
+-    const f = n => l - a * Math.max(-1, Math.min(k(n)-3, Math.min(9-k(n), 1)));
+-    const toHex = x => Math.round(x*255).toString(16).padStart(2,'0');
+-    return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
+-  }
+-  function shade(hex, amt){
+-    const [r,g,b] = hexToInts(hex);
+-    return rgbToHex(r+amt*255, g+amt*255, b+amt*255);
+-  }
+-  function hashHue(str){
+-    let h=0; for (let i=0;i<str.length;i++) h=(h*31+str.charCodeAt(i))>>>0;
+-    return h % 360;
+-  }
+-
+-  // real dominant-color extraction from a small canvas of pixel data
+-  function extractDominantColor(canvas){
+-    const ctx = canvas.getContext('2d');
+-    const { width, height } = canvas;
+-    const data = ctx.getImageData(0,0,width,height).data;
+-    const buckets = {};
+-    for (let i=0;i<data.length;i+=4){
+-      const a = data[i+3];
+-      if (a < 128) continue;
+-      const [h,s,l] = rgbToHsl(data[i], data[i+1], data[i+2]);
+-      if (s < 0.15 || l < 0.08 || l > 0.92) continue; // skip near gray/black/white
+-      const bucket = Math.floor(h/15)*15;
+-      if (!buckets[bucket]) buckets[bucket] = { count:0, sSum:0, lSum:0 };
+-      buckets[bucket].count++;
+-      buckets[bucket].sSum += s;
+-      buckets[bucket].lSum += l;
+-    }
+-    let bestKey = null, bestCount = 0;
+-    for (const k in buckets){ if (buckets[k].count > bestCount){ bestCount = buckets[k].count; bestKey = k; } }
+-    if (bestKey === null){
+-      let rS=0,gS=0,bS=0,n=0;
+-      for (let i=0;i<data.length;i+=4){
+-        if (data[i+3] < 128) continue;
+-        rS+=data[i]; gS+=data[i+1]; bS+=data[i+2]; n++;
+-      }
+-      n = n || 1;
+-      return rgbToHex(rS/n, gS/n, bS/n);
+-    }
+-    const b = buckets[bestKey];
+-    const avgS = b.sSum/b.count, avgL = Math.min(0.62, Math.max(0.3, b.lSum/b.count));
+-    return hslToHex(Number(bestKey), avgS*100, avgL*100);
+-  }
+-
+-  function makeNearestTexture(canvas){
+-    const tex = new THREE.CanvasTexture(canvas);
+-    tex.magFilter = THREE.NearestFilter;
+-    tex.minFilter = THREE.NearestFilter;
+-    tex.wrapS = THREE.RepeatWrapping;
+-    tex.wrapT = THREE.RepeatWrapping;
+-    return tex;
+-  }
+-
+-  function makeGroundTexture(){
+-    const size=16, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx=canvas.getContext('2d'); const img=ctx.createImageData(size,size);
+-    const base=['#3c5a3e','#456647','#345036','#4d6f4f'];
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const n=Math.sin(x*1.7)*Math.cos(y*1.3)+Math.sin((x+y)*0.9);
+-      const idx=Math.min(base.length-1,Math.max(0,Math.round((n+1.4)/0.9)));
+-      const [r,g,b]=hexToInts(base[idx]); const i=(y*size+x)*4;
+-      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0); return canvas;
+-  }
+-  function makeStreetTexture(){
+-    const size=16, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx=canvas.getContext('2d'); const img=ctx.createImageData(size,size);
+-    const base=['#5a5560','#65606c','#4d4954'];
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const n=Math.sin(x*2.1+y*0.4);
+-      const idx=Math.min(base.length-1,Math.max(0,Math.round((n+1)/0.9)));
+-      const [r,g,b]=hexToInts(base[idx]); const i=(y*size+x)*4;
+-      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0); return canvas;
+-  }
+-  function makeBuildingTexture(baseHex, accentHex){
+-    const size=16, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx=canvas.getContext('2d'); const img=ctx.createImageData(size,size);
+-    const [br,bg,bb]=hexToInts(baseHex); const [ar,ag,ab]=hexToInts(accentHex);
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const i=(y*size+x)*4;
+-      const isDoor = x>=6 && x<=9 && y>=9;
+-      const isWindow = (x===3||x===12) && y>=3 && y<=6;
+-      const brickLine = (y%4===0);
+-      let r=br,g=bg,b=bb;
+-      if (isDoor){ r=30; g=22; b=18; }
+-      else if (isWindow){ r=ar; g=ag; b=ab; }
+-      else if (brickLine){ r=Math.max(0,br-18); g=Math.max(0,bg-18); b=Math.max(0,bb-18); }
+-      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0); return canvas;
+-  }
+-  function makeStarTexture(){
+-    const size=6, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx=canvas.getContext('2d'); ctx.fillStyle='#e8e2f0'; ctx.fillRect(0,0,size,size);
+-    return canvas;
+-  }
+-  // placeholder "cover" for mock entries with no real file — a generated
+-  // pixel pattern rather than a blank sign, so mock and real plots read consistently
+-  function makePlaceholderCoverCanvas(baseHex){
+-    const size=20, canvas=document.createElement('canvas'); canvas.width=size; canvas.height=size;
+-    const ctx=canvas.getContext('2d'); const img=ctx.createImageData(size,size);
+-    const [br,bg,bb]=hexToInts(baseHex);
+-    for (let y=0;y<size;y++){ for (let x=0;x<size;x++){
+-      const i=(y*size+x)*4;
+-      const n = Math.sin(x*0.8+y*0.5)+Math.sin((x-y)*0.6);
+-      const f = 0.75 + n*0.12;
+-      img.data[i]=Math.min(255,br*f); img.data[i+1]=Math.min(255,bg*f); img.data[i+2]=Math.min(255,bb*f); img.data[i+3]=255;
+-    }}
+-    ctx.putImageData(img,0,0); return canvas;
+-  }
+-
+-  // ---------- scene / camera / renderer ----------
+-  const PIXEL_SCALE = 1/6;
+-  const scene = new THREE.Scene();
+-  scene.background = new THREE.Color(0x14101c);
+-  scene.fog = new THREE.Fog(0x14101c, 24, 46);
+-
+-  const camera = new THREE.OrthographicCamera(-1,1,1,-1,0.1,200);
+-  const renderer = new THREE.WebGLRenderer({ antialias:false });
+-  renderer.setPixelRatio(1);
+-  stageEl.appendChild(renderer.domElement);
+-
+-  function resizeRenderer(){
+-    const w = Math.max(64, Math.floor(window.innerWidth * PIXEL_SCALE));
+-    const h = Math.max(48, Math.floor(window.innerHeight * PIXEL_SCALE));
+-    renderer.setSize(w, h, false);
+-  }
+-  window.addEventListener('resize', () => { resizeRenderer(); updateCameraFit(); });
+-  resizeRenderer();
+-
+-  scene.add(new THREE.AmbientLight(0x2e2a3c, 1.2));
+-  const moon = new THREE.DirectionalLight(0xcfd0ff, 0.75); moon.position.set(-8,12,6); scene.add(moon);
+-  const warmFill = new THREE.PointLight(0x6a4fd9, 0.4, 30); warmFill.position.set(6,4,-6); scene.add(warmFill);
+-
+-  const groundMat = new THREE.MeshStandardMaterial({ map: makeNearestTexture(makeGroundTexture()), roughness:1 });
+-  const streetMat = new THREE.MeshStandardMaterial({ map: makeNearestTexture(makeStreetTexture()), roughness:1 });
+-
+-  let groundMesh=null, streetMesh=null;
+-  const zSpacing = 6, rowStartZ = -6;
+-
+-  function rebuildGroundAndStreet(rows){
+-    if (groundMesh){ scene.remove(groundMesh); groundMesh.geometry.dispose(); }
+-    if (streetMesh){ scene.remove(streetMesh); streetMesh.geometry.dispose(); }
+-    const minZ = rowStartZ - 5, maxZ = rowStartZ + (rows-1)*zSpacing + 5;
+-    const length = maxZ - minZ, centerZ = (minZ+maxZ)/2;
+-    groundMat.map.repeat.set(10, length/2.4);
+-    streetMat.map.repeat.set(2, length/1.83);
+-    groundMesh = new THREE.Mesh(new THREE.PlaneGeometry(24, length), groundMat);
+-    groundMesh.rotation.x = -Math.PI/2; groundMesh.position.z = centerZ; scene.add(groundMesh);
+-    streetMesh = new THREE.Mesh(new THREE.PlaneGeometry(3, length), streetMat);
+-    streetMesh.rotation.x = -Math.PI/2; streetMesh.position.y = 0.01; streetMesh.position.z = centerZ; scene.add(streetMesh);
+-  }
+-
+-  let builtRows = 0;
+-  function updateCameraFit(){
+-    const rows = Math.max(1, builtRows);
+-    const midZ = rowStartZ + (rows-1)*(zSpacing/2);
+-    const vs = 11 + rows*2.0;
+-    const a = window.innerWidth/window.innerHeight;
+-    camera.left=-vs*a; camera.right=vs*a; camera.top=vs; camera.bottom=-vs;
+-    const dist = 15 + rows*2.0;
+-    camera.position.set(dist, dist*0.875, dist*0.6+midZ);
+-    camera.lookAt(0,0,midZ);
+-    camera.updateProjectionMatrix();
+-  }
+-
+-  // ---------- plots ----------
+-  const plotGroup = new THREE.Group();
+-  scene.add(plotGroup);
+-  const plots = [];
+-
+-  function computeSlotPosition(n){
+-    const side = n%2===0 ? -1 : 1;
+-    const row = Math.floor(n/2);
+-    return { x: side*5.5, z: rowStartZ + row*zSpacing, side };
+-  }
+-
+-  function createPlot(index, title, baseHex, accentHex, coverCanvas){
+-    const { x, z, side } = computeSlotPosition(index);
+-    const g = new THREE.Group();
+-    g.position.set(x, 0, z);
+-
+-    const base = new THREE.Mesh(
+-      new THREE.BoxGeometry(2.6, 0.15, 2.6),
+-      new THREE.MeshStandardMaterial({ color:0x2a2634, roughness:1 })
+-    );
+-    base.position.y = 0.075; g.add(base);
+-
+-    const facadeTex = makeNearestTexture(makeBuildingTexture(baseHex, accentHex));
+-    const building = new THREE.Mesh(
+-      new THREE.BoxGeometry(1.6,1.6,1.6),
+-      new THREE.MeshStandardMaterial({ map: facadeTex, roughness:0.9 })
+-    );
+-    building.position.y = 0.15+0.8; g.add(building);
+-
+-    const roof = new THREE.Mesh(
+-      new THREE.ConeGeometry(1.3,0.9,4),
+-      new THREE.MeshStandardMaterial({ color:0x1c1822, roughness:1 })
+-    );
+-    roof.rotation.y = Math.PI/4; roof.position.y = 0.15+1.6+0.45; g.add(roof);
+-
+-    // sign bearing the analyzed cover (or placeholder pattern for mock entries)
+-    const signTex = makeNearestTexture(coverCanvas);
+-    const sign = new THREE.Mesh(
+-      new THREE.PlaneGeometry(0.9, 0.9),
+-      new THREE.MeshStandardMaterial({ map: signTex, roughness:1, side: THREE.DoubleSide })
+-    );
+-    sign.position.set(0, 1.0, 1.35);
+-    g.add(sign);
+-    const signPost = new THREE.Mesh(
+-      new THREE.BoxGeometry(0.08, 0.5, 0.08),
+-      new THREE.MeshStandardMaterial({ color:0x1c1822 })
+-    );
+-    signPost.position.set(0, 0.4, 1.35);
+-    g.add(signPost);
+-
+-    const lampGroup = new THREE.Group();
+-    lampGroup.position.set(-side*1.7, 0, 0.9);
+-    const pole = new THREE.Mesh(
+-      new THREE.CylinderGeometry(0.05,0.06,1.8,6),
+-      new THREE.MeshStandardMaterial({ color:0x1c1822, roughness:0.8 })
+-    );
+-    pole.position.y = 0.9; lampGroup.add(pole);
+-
+-    const bulbMat = new THREE.MeshStandardMaterial({
+-      color:0x3a3640, emissive:0x000000, emissiveIntensity:0, roughness:0.5
+-    });
+-    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.16,8,8), bulbMat);
+-    bulb.position.y = 1.85; lampGroup.add(bulb);
+-
+-    const glowLight = new THREE.PointLight(0xffcf8a, 0, 4);
+-    glowLight.position.y = 1.85; lampGroup.add(glowLight);
+-    g.add(lampGroup);
+-
+-    plotGroup.add(g);
+-    return { group:g, building, roof, sign, bulbMat, glowLight, lit:false, index, label:title };
+-  }
+-
+-  function igniteLamp(plot, colorHex){
+-    const targetColor = parseInt(colorHex.replace('#','0x'));
+-    plot.bulbMat.emissive.setHex(targetColor);
+-    plot.glowLight.color.setHex(targetColor);
+-    const start = performance.now();
+-    function step(now){
+-      const t = Math.min((now-start)/500, 1);
+-      plot.bulbMat.emissiveIntensity = t;
+-      plot.glowLight.intensity = t*1.15;
+-      if (t<1) requestAnimationFrame(step);
+-      else { plot.lit = true; updateHud(); }
+-    }
+-    requestAnimationFrame(step);
+-  }
+-
+-  function placePlot(title, baseHex, accentHex, lampHex, coverCanvas){
+-    const n = plots.length;
+-    const rowsNeeded = Math.floor(n/2)+1;
+-    if (rowsNeeded > builtRows){ builtRows = rowsNeeded; rebuildGroundAndStreet(builtRows); }
+-    const plot = createPlot(n, title, baseHex, accentHex, coverCanvas);
+-    plots.push(plot);
+-    updateCameraFit();
+-    updateHud();
+-    setTimeout(() => igniteLamp(plot, lampHex), 380);
+-  }
+-
+-  function updateHud(){
+-    const lit = plots.filter(p=>p.lit).length;
+-    hudCount.textContent = `/ town — ${plots.length} plot${plots.length===1?'':'s'}, ${lit} lit`;
+-  }
+-
+-  // ---------- real upload + analysis path ----------
+-  function handleFile(file){
+-    showStatus(`Analyzing "${file.name}"…`);
+-    const img = new Image();
+-    const url = URL.createObjectURL(file);
+-    img.onload = () => {
+-      const s = Math.min(img.width, img.height);
+-      const sx = (img.width-s)/2, sy = (img.height-s)/2;
+-      const thumb = document.createElement('canvas');
+-      thumb.width = 20; thumb.height = 20;
+-      const tctx = thumb.getContext('2d');
+-      tctx.imageSmoothingEnabled = false;
+-      tctx.drawImage(img, sx, sy, s, s, 0, 0, 20, 20);
+-      URL.revokeObjectURL(url);
+-
+-      const dominant = extractDominantColor(thumb);
+-      const baseHex = shade(dominant, -0.28);
+-      const accentHex = shade(dominant, 0.32);
+-      const title = file.name.replace(/\.[^.]+$/, '');
+-      placePlot(title, baseHex, accentHex, dominant, thumb);
+-    };
+-    img.onerror = () => showStatus(`Could not read "${file.name}"`);
+-    img.src = url;
+-  }
+-
+-  document.getElementById('fileInput').addEventListener('change', (e) => {
+-    const files = Array.from(e.target.files || []);
+-    files.forEach(handleFile);
+-    e.target.value = '';
+-  });
+-
+-  // ---------- mock path (no real cover) ----------
+-  const mockTitles = ['Untitled Draft','Working Copy','No Cover Yet','Placeholder Vol.','Draft Pages','Scan Batch'];
+-  let mockCounter = 0;
+-  document.getElementById('addMock').addEventListener('click', () => {
+-    mockCounter++;
+-    const title = `${mockTitles[(mockCounter-1)%mockTitles.length]} #${mockCounter}`;
+-    const hue = hashHue(title);
+-    const dominant = hslToHex(hue, 40, 46);
+-    const baseHex = shade(dominant, -0.28);
+-    const accentHex = shade(dominant, 0.32);
+-    placePlot(title, baseHex, accentHex, dominant, makePlaceholderCoverCanvas(dominant));
+-  });
+-
+-  // seed one row so the town isn't empty on load
+-  document.getElementById('addMock').click();
+-  document.getElementById('addMock').click();
+-
+-  // stars
+-  const starGeo = new THREE.BufferGeometry();
+-  const starCount = 160;
+-  const starPos = new Float32Array(starCount*3);
+-  for (let i=0;i<starCount;i++){
+-    starPos[i*3]=(Math.random()-0.5)*70; starPos[i*3+1]=6+Math.random()*16; starPos[i*3+2]=(Math.random()-0.5)*70;
+-  }
+-  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos,3));
+-  const starMat = new THREE.PointsMaterial({ size:0.1, map:makeNearestTexture(makeStarTexture()), transparent:true, depthWrite:false });
+-  scene.add(new THREE.Points(starGeo, starMat));
+-
+-  // ---------- hover / click ----------
+-  const raycaster = new THREE.Raycaster();
+-  const mouse = new THREE.Vector2();
+-  let hovered = null;
+-
+-  window.addEventListener('mousemove', (e) => {
+-    const rect = renderer.domElement.getBoundingClientRect();
+-    mouse.x = ((e.clientX-rect.left)/rect.width)*2-1;
+-    mouse.y = -((e.clientY-rect.top)/rect.height)*2+1;
+-    tooltip.style.left = (e.clientX+14)+'px';
+-    tooltip.style.top = (e.clientY+14)+'px';
+-  });
+-  window.addEventListener('click', (e) => {
+-    if (e.target.closest('#hud')) return;
+-    if (hovered) console.log('Would open reader for:', hovered.label, '(wired in Stage 5)');
+-  });
+-
+-  function updateHover(){
+-    raycaster.setFromCamera(mouse, camera);
+-    const hits = raycaster.intersectObjects(plots.map(p=>p.building));
+-    if (hits.length){
+-      const hitPlot = plots.find(p=>p.building===hits[0].object);
+-      if (hovered!==hitPlot){ if(hovered) hovered.group.scale.set(1,1,1); hovered=hitPlot; }
+-      hovered.group.scale.set(1.05,1.05,1.05);
+-      tooltip.textContent = hovered.lit ? hovered.label : `${hovered.label} (analyzing…)`;
+-      tooltip.style.opacity = '1';
+-    } else {
+-      if (hovered) hovered.group.scale.set(1,1,1);
+-      hovered = null; tooltip.style.opacity = '0';
+-    }
+-  }
+-
+-  function animate(){
+-    requestAnimationFrame(animate);
+-    updateHover();
+-    renderer.render(scene, camera);
+-  }
+-  animate();
+-})();
+-</script>
+-
+-</body>
+-</html>
+diff --git a/test-results/.last-run.json b/test-results/.last-run.json
+deleted file mode 100644
+index cbcc1fb..0000000
+--- a/test-results/.last-run.json
++++ /dev/null
+@@ -1,4 +0,0 @@
+-{
+-  "status": "passed",
+-  "failedTests": []
+-}
+\ No newline at end of file
+diff --git a/tests/cbr.spec.js b/tests/cbr.spec.js
+index 7813144..8ac041f 100644
+--- a/tests/cbr.spec.js
++++ b/tests/cbr.spec.js
+@@ -5,24 +5,37 @@ const JSZip = require('jszip');
+ const PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=';
+ const pngBuffer = Buffer.from(PNG_BASE64, 'base64');
+ 
+-test('upload a .cbr (zip payload) and ensure town accepts it', async ({ page }) => {
++test('upload a real .cbz (zip) and the town accepts it', async ({ page }) => {
+   await page.goto('/');
+   await page.waitForSelector('#hogarth-hud', { timeout: 10000 });
+ 
+-  // Build an in-memory ZIP with one page
+   const zip = new JSZip();
+   zip.file('0001.png', pngBuffer);
+   const buf = await zip.generateAsync({ type: 'nodebuffer' });
+ 
+-  // Upload as .cbr (CBR extension) to exercise extension handling
+-  // There are two inputs appended; pick the first file input in the page
+   const fileInputs = await page.$$('input[type=file]');
+   if (!fileInputs || fileInputs.length === 0) throw new Error('No file input found');
+-  // Set the file (Playwright will emit change event)
+-  await fileInputs[0].setInputFiles({ name: 'sample.cbr', mimeType: 'application/octet-stream', buffer: buf });
++  await fileInputs[0].setInputFiles({ name: 'sample.cbz', mimeType: 'application/zip', buffer: buf });
+ 
+-  // Wait a bit for processing and check HUD updated with a new plot
+   await page.waitForTimeout(1200);
+   const text = await page.locator('#hogarth-hud').textContent();
+   expect(text).toMatch(/Town \u2014 \d+ plot/);
+ });
++
++test('uploading a .cbr shows the RAR-not-supported help dialog instead of failing silently', async ({ page }) => {
++  await page.goto('/');
++  await page.waitForSelector('#hogarth-hud', { timeout: 10000 });
++
++  // Content doesn't matter here -- .cbr/.rar are rejected by extension
++  // before any parsing is attempted, since real CBR files are RAR
++  // archives, not ZIP, and this app doesn't have a RAR decoder.
++  const zip = new JSZip();
++  zip.file('0001.png', pngBuffer);
++  const buf = await zip.generateAsync({ type: 'nodebuffer' });
++
++  const fileInputs = await page.$$('input[type=file]');
++  await fileInputs[0].setInputFiles({ name: 'sample.cbr', mimeType: 'application/octet-stream', buffer: buf });
++
++  await page.waitForSelector('#hogarth-rar-help', { timeout: 5000 });
++  await expect(page.locator('#hogarth-rar-help')).toContainText('CBR (RAR) not supported');
++});
+-- 
+2.43.0
+
+
+From 050651eed6d113e428cabf479400ecb7643d93a6 Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Mon, 3 Aug 2026 07:39:51 +0000
+Subject: [PATCH 2/2] Fix fake cover-color analysis: town.js never actually
+ used extractDominantColor
+
+Town.addPlot() was coloring every plot by hashing the filename string,
+completely ignoring the actual uploaded cover image. extractDominantColor()
+existed fully written in color.js and was never called anywhere in the app.
+This was the single flagship feature described in docs/DESIGN.md and it
+did not run.
+
+- addPlot() now runs extractDominantColor() on the real cover thumbnail
+- uses the existing hslToHex/shade helpers instead of ad-hoc color math
+- restores the analyze-then-fade-in lamp behavior (380ms delay + 500ms
+  fade) instead of snapping the lamp on instantly
+---
+ src/world/town.js | 45 +++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 39 insertions(+), 6 deletions(-)
+
+diff --git a/src/world/town.js b/src/world/town.js
+index b6aca09..13e0355 100644
+--- a/src/world/town.js
++++ b/src/world/town.js
+@@ -1,6 +1,6 @@
+ import * as THREE from 'three';
+ import { makeNearestTexture, makeGroundTexture, makeStreetTexture, makeBuildingTexture } from './textures.js';
+-import { hashHue } from '../utils/color.js';
++import { hashHue, extractDominantColor, hslToHex, shade } from '../utils/color.js';
+ import { updateCameraFit } from '../core/cameraRig.js';
+ 
+ export class Town {
+@@ -61,12 +61,45 @@ export class Town {
+     const n = this.plots.length;
+     const rowsNeeded = Math.floor(n/2) + 1;
+     if (rowsNeeded > this.builtRows){ this.builtRows = rowsNeeded; this.rebuildGroundAndStreet(this.builtRows); }
+-    const hue = hashHue(title);
+-    const baseHex = `#${('000000'+(Math.floor(hue*6579)%0xFFFFFF).toString(16)).slice(-6)}`; // quick deterministic base
+-    const accentHex = `#${('000000'+(Math.floor((hue+40)%360*6579)%0xFFFFFF).toString(16)).slice(-6)}`;
++
++    // Real cover analysis: extract the dominant color from the actual
++    // uploaded thumbnail when one exists. Falls back to a hash of the
++    // title only for mock/no-cover entries (coverCanvas is still used for
++    // the sign either way -- see TownScene's placeholder-cover path).
++    let dominant;
++    if (coverCanvas){
++      try { dominant = extractDominantColor(coverCanvas); }
++      catch (e) { dominant = hslToHex(hashHue(title), 40, 46); }
++    } else {
++      dominant = hslToHex(hashHue(title), 40, 46);
++    }
++    const baseHex = shade(dominant, -0.28);
++    const accentHex = shade(dominant, 0.32);
++
+     const plot = this.createPlot(n, title, baseHex, accentHex, coverCanvas);
+-    plot.bulbMat.emissive.setHex(0xffcf8a); plot.bulbMat.emissiveIntensity = 1; plot.glowLight.intensity = 1.1; plot.lit = true;
+-    this.plots.push(plot); updateCameraFit(this.camera, this.builtRows);
++    this.plots.push(plot);
++    updateCameraFit(this.camera, this.builtRows);
++
++    // Ignite after a short delay with a fade, rather than snapping on --
++    // this is what makes it read as "the cover was analyzed" instead of
++    // an instant toggle.
++    setTimeout(() => this.igniteLamp(plot, dominant), 380);
++
+     return plot;
+   }
++
++  igniteLamp(plot, colorHex){
++    const targetColor = parseInt(colorHex.replace('#','0x'));
++    plot.bulbMat.emissive.setHex(targetColor);
++    plot.glowLight.color.setHex(targetColor);
++    const start = performance.now();
++    const step = (now) => {
++      const t = Math.min((now-start)/500, 1);
++      plot.bulbMat.emissiveIntensity = t;
++      plot.glowLight.intensity = t * 1.15;
++      if (t < 1) requestAnimationFrame(step);
++      else plot.lit = true;
++    };
++    requestAnimationFrame(step);
++  }
+ }
+-- 
+2.43.0
+

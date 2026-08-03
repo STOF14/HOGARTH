@@ -1,0 +1,37 @@
+From 76de3d90e4a3f97cc07358e816a0620b241c1753 Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Mon, 3 Aug 2026 07:53:43 +0000
+Subject: [PATCH] Fix canvas rendering tiny in the corner: missing CSS to
+ stretch pixel-res canvas to fullscreen
+
+The pixel-art pipeline intentionally renders at a tiny internal resolution
+(renderer.setSize with updateStyle=false), relying on CSS to stretch that
+canvas up to fill the screen with image-rendering:pixelated keeping the
+upscale crisp. That stretch CSS (width:100%; height:100%) was set in the
+original prototype's stylesheet but never got carried over when the
+renderer setup was extracted into pixelRenderer.js -- so the canvas was
+rendering at its native ~300x180px internal size in the top-left corner,
+with the black page background showing through everywhere else. This
+affected both the boot sequence and the town, since both render through
+the same shared renderer.
+---
+ src/core/pixelRenderer.js | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/core/pixelRenderer.js b/src/core/pixelRenderer.js
+index 2476f4f..31ae839 100644
+--- a/src/core/pixelRenderer.js
++++ b/src/core/pixelRenderer.js
+@@ -6,6 +6,9 @@ export function createPixelRenderer({ pixelScale = 1/6, antialias = false, paren
+   const renderer = new THREE.WebGLRenderer({ antialias });
+   renderer.setPixelRatio(1);
+   renderer.domElement.style.imageRendering = 'pixelated';
++  renderer.domElement.style.display = 'block';
++  renderer.domElement.style.width = '100%';
++  renderer.domElement.style.height = '100%';
+   parent.appendChild(renderer.domElement);
+ 
+   function resize(){
+-- 
+2.43.0
+

@@ -6,6 +6,9 @@ export function createPixelRenderer({ pixelScale = 1/6, antialias = false, paren
   const renderer = new THREE.WebGLRenderer({ antialias });
   renderer.setPixelRatio(1);
   renderer.domElement.style.imageRendering = 'pixelated';
+  renderer.domElement.style.display = 'block';
+  renderer.domElement.style.width = '100%';
+  renderer.domElement.style.height = '100%';
   parent.appendChild(renderer.domElement);
 
   function resize(){
