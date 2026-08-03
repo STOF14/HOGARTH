@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { makeNearestTexture, makeGroundTexture, makeStreetTexture, makeBuildingTexture } from './textures.js';
-import { hashHue } from '../utils/color.js';
+import { hashHue, extractDominantColor, hslToHex, shade } from '../utils/color.js';
 import { updateCameraFit } from '../core/cameraRig.js';
 
 export class Town {
@@ -61,12 +61,45 @@ export class Town {
     const n = this.plots.length;
     const rowsNeeded = Math.floor(n/2) + 1;
     if (rowsNeeded > this.builtRows){ this.builtRows = rowsNeeded; this.rebuildGroundAndStreet(this.builtRows); }
-    const hue = hashHue(title);
-    const baseHex = `#${('000000'+(Math.floor(hue*6579)%0xFFFFFF).toString(16)).slice(-6)}`; // quick deterministic base
-    const accentHex = `#${('000000'+(Math.floor((hue+40)%360*6579)%0xFFFFFF).toString(16)).slice(-6)}`;
+
+    // Real cover analysis: extract the dominant color from the actual
+    // uploaded thumbnail when one exists. Falls back to a hash of the
+    // title only for mock/no-cover entries (coverCanvas is still used for
+    // the sign either way -- see TownScene's placeholder-cover path).
+    let dominant;
+    if (coverCanvas){
+      try { dominant = extractDominantColor(coverCanvas); }
+      catch (e) { dominant = hslToHex(hashHue(title), 40, 46); }
+    } else {
+      dominant = hslToHex(hashHue(title), 40, 46);
+    }
+    const baseHex = shade(dominant, -0.28);
+    const accentHex = shade(dominant, 0.32);
+
     const plot = this.createPlot(n, title, baseHex, accentHex, coverCanvas);
-    plot.bulbMat.emissive.setHex(0xffcf8a); plot.bulbMat.emissiveIntensity = 1; plot.glowLight.intensity = 1.1; plot.lit = true;
-    this.plots.push(plot); updateCameraFit(this.camera, this.builtRows);
+    this.plots.push(plot);
+    updateCameraFit(this.camera, this.builtRows);
+
+    // Ignite after a short delay with a fade, rather than snapping on --
+    // this is what makes it read as "the cover was analyzed" instead of
+    // an instant toggle.
+    setTimeout(() => this.igniteLamp(plot, dominant), 380);
+
     return plot;
+  }
+
+  igniteLamp(plot, colorHex){
+    const targetColor = parseInt(colorHex.replace('#','0x'));
+    plot.bulbMat.emissive.setHex(targetColor);
+    plot.glowLight.color.setHex(targetColor);
+    const start = performance.now();
+    const step = (now) => {
+      const t = Math.min((now-start)/500, 1);
+      plot.bulbMat.emissiveIntensity = t;
+      plot.glowLight.intensity = t * 1.15;
+      if (t < 1) requestAnimationFrame(step);
+      else plot.lit = true;
+    };
+    requestAnimationFrame(step);
   }
 }
