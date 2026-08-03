@@ -120,7 +120,41 @@ Real, if simple:
 This is pure client-side canvas math — no network calls, no ML model, works offline. It has no
 concept of subject matter, only color distribution.
 
-## Plot data model
+## Format support (CBZ / CBR / PDF)
+
+Three formats, one unified return shape (`{ files, cache }`, where `cache.get(i)` returns an
+object URL for page `i`) so `ReaderPanel` and the cover-thumbnail logic in `TownScene` stay
+format-agnostic:
+
+- **CBZ/ZIP** — `jszip`, bundled as a real dependency. No network dependency at runtime.
+- **CBR/RAR** — `node-unrar-js`, which wraps the official `unrar` library compiled to
+  WebAssembly. This is a genuine, working RAR decoder, not a fallback chain or a "convert to
+  ZIP" workaround — earlier versions of this codebase pretended to support RAR via a fragile
+  three-layer CDN fallback that never actually worked (see `CHANGELOG.md`); this replaces that
+  entirely. The WASM binary (`src/reader/unrarWasm.js`) is fetched once and cached for the
+  session rather than re-fetched per file. Password-protected RAR archives are explicitly
+  detected and rejected with a clear message rather than hanging or failing silently.
+- **PDF** — `pdfjs-dist` (Mozilla's PDF renderer). Each page is rasterized to a canvas at 2x
+  scale and exported as a PNG blob URL. This means PDF pages are images by the time they reach
+  the reader, same as CBZ/CBR pages — no separate PDF-specific rendering path exists downstream
+  of `decodeComicArchive()`.
+
+**Known limitation, stated honestly:** all three formats currently decode every page upfront on
+upload, not lazily on page-turn. This is simpler and was the fastest path to genuinely-working
+format support, but it doesn't match the lazy-decode-pipeline architecture referenced elsewhere
+in this project's design goals. For a large PDF or a many-page CBZ/CBR, this means a real wait
+on upload rather than an instant add with pages streaming in as you read. Converting to true
+lazy per-page decode (only extract/render the page the person is currently viewing, plus a
+small look-ahead window) is a legitimate follow-up, not something folded into this pass.
+
+**Testing limitation, also stated honestly:** there's no legally-distributable way to generate a
+RAR archive from an automated test — RAR compression is proprietary, and no open-source encoder
+exists to depend on for test fixtures. `node-unrar-js` only decodes RAR, it doesn't create RAR.
+`tests/cbr.spec.js` can only verify the error-handling path (a corrupt/fake `.cbr` file shows the
+decode-error dialog); it cannot verify that a genuine RAR archive actually decodes correctly.
+That has to be checked manually — see `docs/QA_CHECKLIST.md`.
+
+
 
 Each plot is a plain object (not a class) with:
 

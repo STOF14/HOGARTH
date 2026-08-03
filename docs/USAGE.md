@@ -1,5 +1,37 @@
 # Hogarth — Usage Guide
 
+## Running the real app
+
+```bash
+npm install
+npm run dev
+```
+
+Open the local URL Vite prints. The boot sequence plays, then the town. Upload real `.cbz`,
+`.cbr`, or `.pdf` files with the "Upload" button, or use "Mock Add" to grow the town without
+real files. Add `?debug=1` to the URL to reveal legacy stage-navigation buttons in the HUD (dev
+tooling, not part of the normal experience).
+
+## Running the tests
+
+```bash
+npm run test:unit      # Vitest — pure logic (color math, plot placement)
+npx playwright install chromium   # one-time setup
+npm run test:ui        # Playwright — full boot/upload/reader flows in a real browser
+npm test               # both, in sequence
+```
+
+See `docs/QA_CHECKLIST.md` for what still needs manual verification — most notably, real RAR
+(`.cbr`) decoding, which can't be covered by an automated fixture (see
+`docs/ARCHITECTURE.md`'s "Format support" section for why).
+
+## The legacy standalone stage files
+
+The sections below describe `public/stages/*.html` — the five standalone prototype files this
+app was originally built from, kept for reference. They still work (open directly, or via the
+`?debug=1` HUD buttons in the real app) but represent an earlier, disconnected version of the
+experience, not the current app.
+
 All five files are standalone HTML — double-click to open in a browser, or drag into a browser
 window. No build step, no local server needed. Three.js and the Press Start 2P font load from
 CDN (`cdnjs.cloudflare.com`, `fonts.googleapis.com`), so an internet connection is required on

@@ -4,23 +4,40 @@ An honest accounting of what's real, what's a stand-in, and what hasn't been dec
 
 ## Genuinely working, not stubbed
 
-- Pixel-render pipeline (low-res + nearest-neighbor upscale)
+- Pixel-render pipeline (low-res + nearest-neighbor upscale), including the full-screen CSS
+  stretch fix — this regressed once (canvas rendered tiny in a corner) and now has an automated
+  regression test guarding it
 - Boot sequence physics: real contact detection between the two colliding bodies, squash/shake
-  on impact, debris colored from the bodies' own textures
+  on impact, debris colored from the bodies' own textures, wired all the way through to a real
+  hand-off into the town (this also regressed to a non-functional stub at one point and has
+  since been restored)
 - Pixel-dissolve wipe transitions
 - Dynamic plot placement with automatic ground/street growth
-- Camera reframing to fit the growing town
-- Dominant-color extraction from real uploaded images
-- Camera fly-in/fly-out between town view and a focused plot view
+- Camera reframing to fit the growing town, and camera fly-in/fly-out to a focused plot
+- Dominant-color extraction from real uploaded images, genuinely wired into plot/lamp coloring
+  (this also regressed once — plots were being colored by hashing the filename instead of
+  analyzing the actual image — and has since been fixed)
+- **Real CBZ, CBR, and PDF reading.** CBZ via `jszip`, CBR via `node-unrar-js` (genuine RAR
+  decoding, not a "convert to ZIP" workaround), PDF via `pdfjs-dist`. See
+  `docs/ARCHITECTURE.md`'s "Format support" section for the honest limitations (all three decode
+  eagerly rather than lazily, and RAR success can't be verified by the automated test suite).
+- A real automated test suite: Vitest unit tests for the pure color/placement math, Playwright
+  e2e tests covering boot → town → upload (CBZ and PDF, both success and corrupt-file error
+  paths) → reader.
 
 ## Stubbed / placeholder — do not mistake these for finished features
 
-- **The reader panel** (Stage 5) is a labeled mount point, not a reader. No page rendering, no
-  CBZ/CBR handling, no connection to Hogarth's actual decode pipeline or LRU cache.
-- **"Cover analysis"** is dominant-color extraction only. If genre/style-aware behavior is
-  wanted eventually, that's new scope, not a refinement of existing code.
-- **Mock "Add comic" buttons** exist purely for testing town growth without needing real files;
-  they should not ship in any real build.
+- **Page decode is eager, not lazy.** Every format decodes all pages upfront on upload rather
+  than on-demand as the person reads. Doesn't match the lazy-decode-pipeline goal referenced
+  elsewhere in this project. Fine for short comics, a real wait for long ones.
+- **"Cover analysis" is dominant-color extraction only**, not content/genre understanding. If
+  genre- or style-aware placement is wanted eventually, that's new scope.
+- **Mock "Add comic" button** exists purely for testing town growth without needing real files;
+  should not ship in a real build.
+- **RAR support is untested by CI.** It's genuinely implemented, but no open-source RAR encoder
+  exists to generate a test fixture, so the automated suite only checks RAR's error-handling
+  path. A real RAR file needs manual verification before trusting a release — see
+  `docs/QA_CHECKLIST.md`.
 
 ## Not yet done at all
 

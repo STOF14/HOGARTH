@@ -3,6 +3,13 @@ import { makeNearestTexture, makeGroundTexture, makeStreetTexture, makeBuildingT
 import { hashHue, extractDominantColor, hslToHex, shade } from '../utils/color.js';
 import { updateCameraFit } from '../core/cameraRig.js';
 
+// Pure function, no DOM/THREE dependency -- kept separate so it's testable
+// in a plain Node environment (see tests/unit/town.test.js).
+export function computeSlotPosition(n, rowStartZ = -6, zSpacing = 6){
+  const side = n % 2 === 0 ? -1 : 1; const row = Math.floor(n/2);
+  return { x: side*5.5, z: rowStartZ + row*zSpacing, row, side };
+}
+
 export class Town {
   constructor(scene, camera){
     this.scene = scene; this.camera = camera;
@@ -15,8 +22,7 @@ export class Town {
   }
 
   computeSlotPosition(n){
-    const side = n % 2 === 0 ? -1 : 1; const row = Math.floor(n/2);
-    return { x: side*5.5, z: this.rowStartZ + row*this.zSpacing, row, side };
+    return computeSlotPosition(n, this.rowStartZ, this.zSpacing);
   }
 
   rebuildGroundAndStreet(rows){

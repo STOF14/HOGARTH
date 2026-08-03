@@ -1,14 +1,16 @@
-// Archive loader, LRU page cache, and decode pipeline.
+// Archive/document loader, LRU page cache, and format dispatch.
 //
-// CBZ/ZIP is handled with jszip -- a real bundled dependency, no runtime
-// network fetch required. CBR/RAR is not decoded client-side: no
-// actively-maintained, reliably-licensed pure-JS RAR extractor exists that's
-// safe to depend on here. Rather than chain several fragile CDN-loaded
-// fallbacks that may or may not work depending on the file, we fail
-// honestly and point the person at converting to CBZ. If real RAR support
-// becomes a priority, that's a deliberate feature to scope and build, not
-// something to bolt on as a best-effort fallback.
+// .cbz / .zip  -> jszip (bundled, no network dependency)
+// .cbr / .rar  -> node-unrar-js (official unrar compiled to WASM, bundled)
+// .pdf         -> pdfjs-dist, pages rendered to canvas/PNG
+//
+// All three converge on the same return shape: { files, cache }, where
+// cache.get(i) returns an object URL for page i. This is what lets
+// ReaderPanel stay format-agnostic.
 import JSZip from 'jszip';
+import { createExtractorFromData } from 'node-unrar-js';
+import { getUnrarWasmBinary } from './unrarWasm.js';
+import { extractPdfPages } from './pdfSource.js';
 
 export class PageCache {
   constructor(limit = 32){ this.limit = limit; this.map = new Map(); }
@@ -25,15 +27,15 @@ export class PageCache {
 }
 
 const IMAGE_RE = /\.(jpe?g|png|gif|webp)$/i;
-const RAR_RE = /\.cbr$|\.rar$/i;
 
-export async function decodeComicArchive(file, onProgress){
-  const name = (file && file.name) || '';
+function guessImageMime(name){
+  if (/\.png$/i.test(name)) return 'image/png';
+  if (/\.gif$/i.test(name)) return 'image/gif';
+  if (/\.webp$/i.test(name)) return 'image/webp';
+  return 'image/jpeg';
+}
 
-  if (RAR_RE.test(name)){
-    throw new Error('CBR (RAR) archives are not supported yet. Convert to CBZ (ZIP) and re-upload -- see the help dialog for a converter link.');
-  }
-
+async function extractZip(file, onProgress){
   const ab = await file.arrayBuffer();
   let zip;
   try{
@@ -54,11 +56,83 @@ export async function decodeComicArchive(file, onProgress){
   for (let i = 0; i < entries.length; i++){
     const entry = entries[i];
     const blob = await entry.async('blob');
-    const typed = blob.type ? blob : new Blob([blob], { type: /\.png$/i.test(entry.name) ? 'image/png' : 'image/jpeg' });
-    const url = URL.createObjectURL(typed);
-    cache.set(i, url);
+    const typed = blob.type ? blob : new Blob([blob], { type: guessImageMime(entry.name) });
+    cache.set(i, URL.createObjectURL(typed));
     if (onProgress) onProgress(i, entries.length);
   }
-
   return { files: entries.map(e => ({ name: e.name })), cache };
+}
+
+async function extractRar(file, onProgress){
+  const data = await file.arrayBuffer();
+  let wasmBinary;
+  try{
+    wasmBinary = await getUnrarWasmBinary();
+  } catch (err){
+    throw new Error('Could not load the RAR decoder. Check your connection and try again.');
+  }
+
+  let extractor;
+  try{
+    extractor = await createExtractorFromData({ wasmBinary, data });
+  } catch (err){
+    throw new Error('Could not read this file as a RAR/CBR archive. It may be corrupt, encrypted, or a different format.');
+  }
+
+  let headers;
+  try{
+    const list = extractor.getFileList();
+    headers = Array.from(list.fileHeaders)
+      .filter(h => !h.flags.directory && IMAGE_RE.test(h.name))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+  } catch (err){
+    throw new Error('Could not read the contents of this RAR/CBR archive.');
+  }
+
+  if (!headers.length){
+    throw new Error('No image files found inside the archive.');
+  }
+  if (headers.some(h => h.flags.encrypted)){
+    throw new Error('This RAR archive is password-protected, which is not supported.');
+  }
+
+  const nameToIndex = new Map(headers.map((h, idx) => [h.name, idx]));
+  const cache = new PageCache(64);
+
+  const { files: extractedGen } = extractor.extract({ files: headers.map(h => h.name) });
+  let extractedCount = 0;
+  for (const arcFile of extractedGen){
+    if (!arcFile.extraction) continue;
+    const idx = nameToIndex.get(arcFile.fileHeader.name);
+    if (idx === undefined) continue;
+    const blob = new Blob([arcFile.extraction], { type: guessImageMime(arcFile.fileHeader.name) });
+    cache.set(idx, URL.createObjectURL(blob));
+    extractedCount++;
+    if (onProgress) onProgress(idx, headers.length);
+  }
+
+  if (extractedCount === 0){
+    throw new Error('Could not extract any pages from this RAR/CBR archive.');
+  }
+  return { files: headers.map(h => ({ name: h.name })), cache };
+}
+
+async function extractPdf(file, onProgress){
+  let result;
+  try{
+    result = await extractPdfPages(file, onProgress);
+  } catch (err){
+    throw new Error(err && err.message ? err.message : 'Could not read this PDF.');
+  }
+  const cache = new PageCache(64);
+  result.urls.forEach((url, i) => cache.set(i, url));
+  return { files: result.files, cache };
+}
+
+export async function decodeComicArchive(file, onProgress){
+  const name = (file && file.name) || '';
+  if (/\.pdf$/i.test(name)) return extractPdf(file, onProgress);
+  if (/\.cbr$|\.rar$/i.test(name)) return extractRar(file, onProgress);
+  if (/\.cbz$|\.zip$/i.test(name)) return extractZip(file, onProgress);
+  throw new Error('Unsupported file type. Use .cbz, .cbr, or .pdf.');
 }

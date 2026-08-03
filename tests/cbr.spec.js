@@ -1,41 +1,29 @@
 const { test, expect } = require('@playwright/test');
-const JSZip = require('jszip');
 
-// 1x1 transparent PNG
-const PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=';
-const pngBuffer = Buffer.from(PNG_BASE64, 'base64');
+// IMPORTANT LIMITATION: there is no legally-distributable way to generate a
+// real RAR archive from an automated test (RAR compression is proprietary;
+// no open-source encoder exists to depend on here). node-unrar-js only
+// decodes RAR, it doesn't create RAR. So this file can only verify the
+// error-handling path automatically. A real .cbr upload -- confirming
+// actual RAR pages decode and display correctly -- needs to be checked
+// manually with a genuine RAR file. See docs/QA_CHECKLIST.md.
 
-test('upload a real .cbz (zip) and the town accepts it', async ({ page }) => {
+async function skipBoot(page){
   await page.goto('/');
-  await page.waitForSelector('#hogarth-hud', { timeout: 10000 });
+  await page.locator('button:has-text("Skip")').click({ timeout: 8000 }).catch(() => {});
+}
 
-  const zip = new JSZip();
-  zip.file('0001.png', pngBuffer);
-  const buf = await zip.generateAsync({ type: 'nodebuffer' });
+test('uploading a corrupt/fake .cbr shows a decode-error dialog instead of failing silently', async ({ page }) => {
+  await skipBoot(page);
+  await page.waitForSelector('#hogarth-hud', { timeout: 15000 });
 
   const fileInputs = await page.$$('input[type=file]');
-  if (!fileInputs || fileInputs.length === 0) throw new Error('No file input found');
-  await fileInputs[0].setInputFiles({ name: 'sample.cbz', mimeType: 'application/zip', buffer: buf });
+  await fileInputs[0].setInputFiles({
+    name: 'broken.cbr',
+    mimeType: 'application/octet-stream',
+    buffer: Buffer.from('this is not a real rar file')
+  });
 
-  await page.waitForTimeout(1200);
-  const text = await page.locator('#hogarth-hud').textContent();
-  expect(text).toMatch(/Town \u2014 \d+ plot/);
-});
-
-test('uploading a .cbr shows the RAR-not-supported help dialog instead of failing silently', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForSelector('#hogarth-hud', { timeout: 10000 });
-
-  // Content doesn't matter here -- .cbr/.rar are rejected by extension
-  // before any parsing is attempted, since real CBR files are RAR
-  // archives, not ZIP, and this app doesn't have a RAR decoder.
-  const zip = new JSZip();
-  zip.file('0001.png', pngBuffer);
-  const buf = await zip.generateAsync({ type: 'nodebuffer' });
-
-  const fileInputs = await page.$$('input[type=file]');
-  await fileInputs[0].setInputFiles({ name: 'sample.cbr', mimeType: 'application/octet-stream', buffer: buf });
-
-  await page.waitForSelector('#hogarth-rar-help', { timeout: 5000 });
-  await expect(page.locator('#hogarth-rar-help')).toContainText('CBR (RAR) not supported');
+  await page.waitForSelector('#hogarth-decode-error', { timeout: 8000 });
+  await expect(page.locator('#hogarth-decode-error')).toContainText('Could not add');
 });

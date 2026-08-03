@@ -25,13 +25,14 @@ export default function TownScene({ scene, camera, container, appState }){
 
       // file input + mock button
       const input = document.createElement('input'); input.type='file';
-      // Accept common archive extensions and RAR MIME types so iOS shows them where possible
-      input.accept = 'image/*,.cbz,.zip,.cbr,.rar,application/x-rar-compressed,application/vnd.rar,application/octet-stream';
+      // Accept common comic/document formats, including RAR MIME variants so
+      // iOS shows them where possible.
+      input.accept = 'image/*,.cbz,.zip,.cbr,.rar,.pdf,application/pdf,application/x-rar-compressed,application/vnd.rar,application/octet-stream';
       input.style.display='none';
       // Fallback input without accept for platforms that hide custom extensions (iPad iOS picker)
       const inputAny = document.createElement('input'); inputAny.type='file'; inputAny.style.display='none';
       const uploadBtn = document.createElement('button'); uploadBtn.textContent = 'Upload';
-      const altBtn = document.createElement('button'); altBtn.textContent = 'Select any file'; altBtn.title = 'Use this if your device does not show .cbr/.rar in the picker';
+      const altBtn = document.createElement('button'); altBtn.textContent = 'Select any file'; altBtn.title = 'Use this if your device does not show .cbr/.rar/.pdf in the picker';
       const mockBtn = document.createElement('button'); mockBtn.textContent = 'Mock Add';
       hudControls.appendChild(uploadBtn); hudControls.appendChild(altBtn); hudControls.appendChild(mockBtn);
       document.body.appendChild(input);
@@ -57,34 +58,28 @@ export default function TownScene({ scene, camera, container, appState }){
       input.addEventListener('change', onInputChange);
       inputAny.addEventListener('change', onInputChange);
 
-      // Show a small help dialog explaining RAR/CBR limitations and conversion options
-      function showRarHelp(filename){
-        function makeLink(href, text){ return `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`; }
-        const existing = document.getElementById('hogarth-rar-help');
-        if (existing) return;
-        const el = document.createElement('div'); el.id = 'hogarth-rar-help';
+      // Generic decode-error dialog -- shown when a .cbz/.cbr/.pdf fails to
+      // decode (corrupt file, password-protected RAR, unreadable PDF, etc).
+      function showDecodeErrorHelp(filename, message){
+        const existing = document.getElementById('hogarth-decode-error');
+        if (existing) existing.parentNode.removeChild(existing);
+        const el = document.createElement('div'); el.id = 'hogarth-decode-error';
         el.style.position = 'fixed'; el.style.left='50%'; el.style.top='18%'; el.style.transform='translateX(-50%)'; el.style.zIndex='120';
         el.style.background='rgba(20,16,28,0.98)'; el.style.color='#f0ece2'; el.style.border='1px solid rgba(240,236,226,0.2)'; el.style.padding='14px'; el.style.maxWidth='560px'; el.style.fontFamily='IBM Plex Mono, monospace'; el.style.fontSize='13px'; el.style.boxShadow='0 6px 18px rgba(0,0,0,0.6)';
         const fname = filename ? ` "${filename}"` : '';
         el.innerHTML = `
-          <div style="margin-bottom:8px; font-weight:600;">CBR (RAR) not supported</div>
-          <div style="margin-bottom:8px; color:rgba(240,236,226,0.9)">The file${fname} appears to be a RAR archive. RAR decoding isn't available in this build. Convert to CBZ (ZIP) or upload from a desktop.</div>
-          <div style="margin-bottom:8px">Try one of these options:</div>
-          <ul style="margin:0 0 10px 18px; color:rgba(240,236,226,0.85)">
-            <li>Use an online converter: ${makeLink('https://convertio.co/rar-zip/','Convert RAR → ZIP')}</li>
-            <li>On desktop: rename/move to a computer and create a ZIP (.cbz)</li>
-          </ul>
-          <div style="text-align:right"><button id="hogarth-rar-close" style="padding:6px 10px">OK</button></div>
+          <div style="margin-bottom:8px; font-weight:600;">Could not add${fname}</div>
+          <div style="margin-bottom:10px; color:rgba(240,236,226,0.9)">${message || 'This file could not be read.'}</div>
+          <div style="text-align:right"><button id="hogarth-decode-error-close" style="padding:6px 10px">OK</button></div>
         `;
         document.body.appendChild(el);
-        el.querySelector('#hogarth-rar-close').addEventListener('click', ()=>{ if (el.parentNode) el.parentNode.removeChild(el); });
+        el.querySelector('#hogarth-decode-error-close').addEventListener('click', ()=>{ if (el.parentNode) el.parentNode.removeChild(el); });
       }
 
       async function processFile(f){
         if (!f) return;
-        // If this looks like an archive, try decode path
-        if (/\.(cbz|zip|cbr|rar)$/i.test(f.name)){
-          // decode archive and add first page as cover (simple flow)
+        // If this looks like a comic archive or document, try the decode path
+        if (/\.(cbz|zip|cbr|rar|pdf)$/i.test(f.name)){
           try{
             const { files, cache } = await decodeComicArchive(f, (i,n)=>{ /* progress */ });
             if (files.length){
@@ -97,12 +92,7 @@ export default function TownScene({ scene, camera, container, appState }){
               };
             }
           } catch (err){
-            // If decoding failed (likely RAR support), show a helpful message and offer fallback
-            if (/CBR \(RAR\) archives are not supported/i.test(err.message || '')){
-              showRarHelp(f && f.name);
-            } else {
-              alert(err.message || 'Could not decode archive.');
-            }
+            showDecodeErrorHelp(f && f.name, err && err.message);
           }
         } else if (/image\//i.test(f.type)){
           const img = new Image(); const url = URL.createObjectURL(f); img.onload = ()=>{
