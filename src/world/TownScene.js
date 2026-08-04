@@ -11,6 +11,10 @@ export default function TownScene({ scene, camera, container, appState }){
   // structured HUD: label + controls so we can update text without clobbering buttons
   const hudLabel = document.createElement('div'); hudLabel.style.marginBottom = '6px'; hud.appendChild(hudLabel);
   const hudControls = document.createElement('div'); hudControls.style.display = 'flex'; hudControls.style.gap = '8px'; hud.appendChild(hudControls);
+  const hudStatus = document.createElement('div');
+  hudStatus.style.marginTop = '6px'; hudStatus.style.fontSize = '12px'; hudStatus.style.opacity = '0.75'; hudStatus.style.minHeight = '16px';
+  hud.appendChild(hudStatus);
+  function setStatus(msg){ hudStatus.textContent = msg || ''; }
 
   function updateHud(){
     const count = town ? town.plots.length : 0;
@@ -78,28 +82,69 @@ export default function TownScene({ scene, camera, container, appState }){
 
       async function processFile(f){
         if (!f) return;
+        setStatus(`Reading "${f.name}"…`);
         // If this looks like a comic archive or document, try the decode path
         if (/\.(cbz|zip|cbr|rar|pdf)$/i.test(f.name)){
           try{
-            const { files, cache } = await decodeComicArchive(f, (i,n)=>{ /* progress */ });
-            if (files.length){
-              const url = cache.get(0);
-              const img = new Image(); img.crossOrigin='anonymous'; img.src = url;
-              img.onload = ()=>{
+            setStatus(`Analyzing "${f.name}"…`);
+            const { files, cache } = await withTimeout(
+              decodeComicArchive(f, (i,n)=>{ setStatus(`Analyzing "${f.name}"… (${i+1}/${n})`); }),
+              45000,
+              `Timed out reading "${f.name}" — it may be too large, or the RAR/PDF decoder may have hung.`
+            );
+            if (!files.length){
+              throw new Error('No pages were found in this file.');
+            }
+            const url = cache.get(0);
+            const img = new Image();
+            img.onload = ()=>{
+              try{
                 const s = Math.min(img.width, img.height); const sx=(img.width-s)/2, sy=(img.height-s)/2; const thumb=document.createElement('canvas'); thumb.width=20; thumb.height=20; const tctx=thumb.getContext('2d'); tctx.imageSmoothingEnabled=false; tctx.drawImage(img, sx, sy, s, s, 0, 0, 20,20);
                 town.addPlot(f.name.replace(/\.[^.]+$/,''), thumb);
                 updateHud();
-              };
-            }
+                setStatus('');
+              } catch (err){
+                console.error('[TownScene] thumbnail generation failed:', err);
+                showDecodeErrorHelp(f.name, 'Could not generate a cover thumbnail from the first page.');
+                setStatus('');
+              }
+            };
+            img.onerror = (e)=>{
+              console.error('[TownScene] first-page image failed to load:', e, 'url:', url);
+              showDecodeErrorHelp(f.name, 'The first page decoded but the browser could not display it as an image.');
+              setStatus('');
+            };
+            img.src = url;
           } catch (err){
+            console.error('[TownScene] processFile (archive/doc) failed:', err);
             showDecodeErrorHelp(f && f.name, err && err.message);
+            setStatus('');
           }
         } else if (/image\//i.test(f.type)){
-          const img = new Image(); const url = URL.createObjectURL(f); img.onload = ()=>{
+          const img = new Image(); const url = URL.createObjectURL(f);
+          img.onload = ()=>{
             const s = Math.min(img.width, img.height); const sx=(img.width-s)/2, sy=(img.height-s)/2; const thumb=document.createElement('canvas'); thumb.width=20; thumb.height=20; const tctx=thumb.getContext('2d'); tctx.imageSmoothingEnabled=false; tctx.drawImage(img, sx, sy, s, s, 0, 0, 20,20); URL.revokeObjectURL(url);
-            town.addPlot(f.name.replace(/\.[^.]+$/,''), thumb); updateHud();
-          }; img.src = url;
+            town.addPlot(f.name.replace(/\.[^.]+$/,''), thumb); updateHud(); setStatus('');
+          };
+          img.onerror = (e)=>{
+            console.error('[TownScene] image upload failed to load:', e);
+            URL.revokeObjectURL(url);
+            showDecodeErrorHelp(f.name, 'Could not read this image file.');
+            setStatus('');
+          };
+          img.src = url;
+        } else {
+          setStatus('');
+          showDecodeErrorHelp(f.name, 'Unrecognized file type. Use .cbz, .cbr, .pdf, or an image.');
         }
+      }
+
+      function withTimeout(promise, ms, message){
+        let timer;
+        const timeout = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(message)), ms);
+        });
+        return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
       }
       
       // mock button handler
