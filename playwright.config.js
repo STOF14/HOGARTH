@@ -7,14 +7,14 @@ module.exports = defineConfig({
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
     headless: true,
-    baseURL: 'http://localhost:5175',
+    baseURL: 'http://localhost:5173',
     ignoreHTTPSErrors: true,
     viewport: { width: 1280, height: 800 },
     actionTimeout: 10000,
   },
   webServer: {
     command: 'npm run dev',
-    url: 'http://localhost:5175',
+    url: 'http://localhost:5173',
     reuseExistingServer: true,
     timeout: 120000,
   },

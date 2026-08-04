@@ -35,6 +35,16 @@ function guessImageMime(name){
   return 'image/jpeg';
 }
 
+// node-unrar-js throws an UnrarError with a `.reason` code (e.g.
+// ERAR_BAD_ARCHIVE, ERAR_UNKNOWN_FORMAT, ERAR_MISSING_PASSWORD) plus a
+// `.message`. Surfacing that instead of a generic string is the difference
+// between "it broke" and actually being able to diagnose why.
+function describeUnrarError(err, prefix){
+  const reason = err && err.reason ? ` [${err.reason}]` : '';
+  const detail = err && err.message ? `: ${err.message}` : '';
+  return `${prefix}${reason}${detail}`;
+}
+
 async function extractZip(file, onProgress){
   const ab = await file.arrayBuffer();
   let zip;
@@ -69,6 +79,7 @@ async function extractRar(file, onProgress){
   try{
     wasmBinary = await getUnrarWasmBinary();
   } catch (err){
+    console.error('[archive.js] Failed to load unrar WASM binary:', err);
     throw new Error('Could not load the RAR decoder. Check your connection and try again.');
   }
 
@@ -76,7 +87,8 @@ async function extractRar(file, onProgress){
   try{
     extractor = await createExtractorFromData({ wasmBinary, data });
   } catch (err){
-    throw new Error('Could not read this file as a RAR/CBR archive. It may be corrupt, encrypted, or a different format.');
+    console.error('[archive.js] createExtractorFromData failed:', err);
+    throw new Error(describeUnrarError(err, 'Could not open this file as a RAR/CBR archive'));
   }
 
   let headers;
@@ -86,7 +98,8 @@ async function extractRar(file, onProgress){
       .filter(h => !h.flags.directory && IMAGE_RE.test(h.name))
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
   } catch (err){
-    throw new Error('Could not read the contents of this RAR/CBR archive.');
+    console.error('[archive.js] getFileList() failed:', err);
+    throw new Error(describeUnrarError(err, 'Could not read the contents of this RAR/CBR archive'));
   }
 
   if (!headers.length){
@@ -99,16 +112,28 @@ async function extractRar(file, onProgress){
   const nameToIndex = new Map(headers.map((h, idx) => [h.name, idx]));
   const cache = new PageCache(64);
 
-  const { files: extractedGen } = extractor.extract({ files: headers.map(h => h.name) });
+  let extractedGen;
+  try{
+    ({ files: extractedGen } = extractor.extract({ files: headers.map(h => h.name) }));
+  } catch (err){
+    console.error('[archive.js] extract() failed:', err);
+    throw new Error(describeUnrarError(err, 'Could not extract pages from this RAR/CBR archive'));
+  }
+
   let extractedCount = 0;
-  for (const arcFile of extractedGen){
-    if (!arcFile.extraction) continue;
-    const idx = nameToIndex.get(arcFile.fileHeader.name);
-    if (idx === undefined) continue;
-    const blob = new Blob([arcFile.extraction], { type: guessImageMime(arcFile.fileHeader.name) });
-    cache.set(idx, URL.createObjectURL(blob));
-    extractedCount++;
-    if (onProgress) onProgress(idx, headers.length);
+  try{
+    for (const arcFile of extractedGen){
+      if (!arcFile.extraction) continue;
+      const idx = nameToIndex.get(arcFile.fileHeader.name);
+      if (idx === undefined) continue;
+      const blob = new Blob([arcFile.extraction], { type: guessImageMime(arcFile.fileHeader.name) });
+      cache.set(idx, URL.createObjectURL(blob));
+      extractedCount++;
+      if (onProgress) onProgress(idx, headers.length);
+    }
+  } catch (err){
+    console.error('[archive.js] error while iterating extracted pages:', err);
+    throw new Error(describeUnrarError(err, `Could not extract pages from this RAR/CBR archive (got ${extractedCount} of ${headers.length} before failing)`));
   }
 
   if (extractedCount === 0){
